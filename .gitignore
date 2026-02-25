@@ -1,6 +1,7 @@
-# Ignore data and RARE25-Baselines folders
+# Ignore data and RARE25 folders
 data/
 RARE25-Baselines/
+RARE25-Submissions/
 
 # Python
 __pycache__/
