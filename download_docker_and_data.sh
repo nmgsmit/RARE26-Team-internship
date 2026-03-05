@@ -12,4 +12,4 @@ apptainer pull ###FILL IN OUR OWN DOCKER LOCATION WHEN MADE###
 # Use the huggingface-cli package inside the container to download the data
 mkdir -p data
 apptainer exec container.sif \
-    huggingface-cli download ###FILL IN HUGGINGFACE LOCATION OF RARE25 DATASET###
+    huggingface-cli download TimJaspersTue/RARE25-train
