@@ -7,9 +7,9 @@
 #SBATCH --time=3:00:00
 
 # Pull container from dockerhub
-apptainer pull container.sif docker://cclaess/5lsm0:v1
+apptainer pull ###FILL IN OUR OWN DOCKER LOCATION WHEN MADE###
 
 # Use the huggingface-cli package inside the container to download the data
 mkdir -p data
 apptainer exec container.sif \
-    huggingface-cli download TimJaspersTue/5LSM0 --local-dir ./data --repo-type dataset
+    huggingface-cli download ###FILL IN HUGGINGFACE LOCATION OF RARE25 DATASET###
