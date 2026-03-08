@@ -1,246 +1,190 @@
-"""
-This script implements a training loop for the model. It is designed to be flexible, 
-allowing you to easily modify hyperparameters using a command-line argument parser.
-
-### Key Features:
-1. **Hyperparameter Tuning:** Adjust hyperparameters by parsing arguments from the `main.sh` script or directly 
-   via the command line.
-2. **Remote Execution Support:** Since this script runs on a server, training progress is not visible on the console. 
-   To address this, we use the `wandb` library for logging and tracking progress and results.
-3. **Encapsulation:** The training loop is encapsulated in a function, enabling it to be called from the main block. 
-   This ensures proper execution when the script is run directly.
-
-Feel free to customize the script as needed for your use case.
-"""
 import os
-from argparse import ArgumentParser
-
-import wandb
 import torch
 import torch.nn as nn
+from argparse import ArgumentParser
 from torch.optim import AdamW
-from torch.utils.data import DataLoader
-from torchvision.datasets import Cityscapes
-from torchvision.utils import make_grid
-from torchvision.transforms.v2 import (
-    Compose,
-    Normalize,
-    Resize,
-    ToImage,
-    ToDtype,
-    InterpolationMode
-)
-
-from model import Model
-
-
-# Mapping class IDs to train IDs
-id_to_trainid = {cls.id: cls.train_id for cls in Cityscapes.classes}
-def convert_to_train_id(label_img: torch.Tensor) -> torch.Tensor:
-    return label_img.apply_(lambda x: id_to_trainid[x])
-
-# Mapping train IDs to color
-train_id_to_color = {cls.train_id: cls.color for cls in Cityscapes.classes if cls.train_id != 255}
-train_id_to_color[255] = (0, 0, 0)  # Assign black to ignored labels
-
-def convert_train_id_to_color(prediction: torch.Tensor) -> torch.Tensor:
-    batch, _, height, width = prediction.shape
-    color_image = torch.zeros((batch, 3, height, width), dtype=torch.uint8)
-
-    for train_id, color in train_id_to_color.items():
-        mask = prediction[:, 0] == train_id
-
-        for i in range(3):
-            color_image[:, i][mask] = color[i]
-
-    return color_image
-
+from torch.utils.data import DataLoader, ConcatDataset, Subset
+from torchvision.datasets import ImageFolder
+from torchvision.transforms.v2 import Compose, Resize, ToImage, ToDtype, Normalize
+from sklearn.model_selection import train_test_split
+import wandb
+ 
+# Dataset structure:
+# data/
+# ├── center_1/
+# │   ├── ndbe/  
+# │   └── neo/  
+# └── center_2/
+#     ├── ndbe/
+#     └── neo/ 
+### 
 
 def get_args_parser():
-
-    parser = ArgumentParser("Training script for a PyTorch U-Net model")
-    parser.add_argument("--data-dir", type=str, default="./data/cityscapes", help="Path to the training data")
-    parser.add_argument("--batch-size", type=int, default=64, help="Training batch size")
-    parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs")
-    parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
-    parser.add_argument("--num-workers", type=int, default=10, help="Number of workers for data loaders")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
-    parser.add_argument("--experiment-id", type=str, default="unet-training", help="Experiment ID for Weights & Biases")
-
+    parser = ArgumentParser("RARE25 Classification Training")
+    # Change the default path to match your folder name!
+    parser.add_argument("--data-dir", type=str, default="./data", help="Where you put center_1, center_2, etc.")
+    parser.add_argument("--DatasetSplit", type=int, default=80, help="Percentage of images for training (rest for validation)")
+    parser.add_argument("--batch-size", type=int, default=32, help="How many images to look at once")
+    parser.add_argument("--epochs", type=int, default=20, help="How many times to loop over the whole dataset")
+    parser.add_argument("--lr", type=float, default=1e-4, help="How fast the model 'learns'")
+    parser.add_argument("--num-workers", type=int, default=4, help="CPU power for loading images")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducibility")
+    parser.add_argument("--experiment-id", type=str, default="rare25-test-run")
+    parser.add_argument("--save-dir", type=str, default="./checkpoints", help="Where to save the trained model")
     return parser
 
-
 def main(args):
-    # Initialize wandb for logging
-    wandb.init(
-        project="5lsm0-cityscapes-segmentation",  # Project name in wandb
-        name=args.experiment_id,  # Experiment name in wandb
-        config=vars(args),  # Save hyperparameters
-    )
-
-    # Create output directory if it doesn't exist
-    output_dir = os.path.join("checkpoints", args.experiment_id)
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Set seed for reproducability
-    # If you add other sources of randomness (NumPy, Random), 
-    # make sure to set their seeds as well
+    # Log into Weights & Biases so we can see the graphs later
+    wandb.init(project="RARE25-Project", name=args.experiment_id, config=vars(args))
+    
+    # Setup directories and devices
+    os.makedirs(args.save_dir, exist_ok=True) # Ensure save directory exists
     torch.manual_seed(args.seed)
-    torch.backends.cudnn.deterministic = True
-
-    # Define the device
+    torch.backends.cudnn.deterministic = True 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Define the transforms to apply to the data
-    img_transform = Compose([
-    ToImage(),
-    Resize((256, 256)),
-    ToDtype(torch.float32, scale=True),
-    Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-    ])
+    # DATA ---------------------------------------------------------------------------------------------------------------
+    # In the coming part different steps of data loading and preparation are performed.
+    # -------------------------------------------------------------------------------------------------------- DATA LOADING 
+    # Check if the data is in a folder, if yes then this step will be skipped. Otherwise we download via huggingface.
+    # Do note that you need to fill in your personal huggingface token in the .env file for this to work.
 
-    # Target transform (mask)
-    target_transform = Compose([
-        ToImage(),
-        Resize((256, 256), interpolation=InterpolationMode.NEAREST),
-        ToDtype(torch.int64),  # no scaling
-    ])
-
-    # Load the dataset and make a split for training and validation
-    train_dataset = Cityscapes(
-    args.data_dir,
-    split="train",
-    mode="fine",
-    target_type="semantic",
-    transform=img_transform,
-    target_transform=target_transform,
-    )
-
-    valid_dataset = Cityscapes(
-        args.data_dir,
-        split="val",
-        mode="fine",
-        target_type="semantic",
-        transform=img_transform,
-        target_transform=target_transform,
-    )
-
-    train_dataloader = DataLoader(
-        train_dataset, 
-        batch_size=args.batch_size, 
-        shuffle=True,
-        num_workers=args.num_workers
-    )
-    valid_dataloader = DataLoader(
-        valid_dataset, 
-        batch_size=args.batch_size, 
-        shuffle=False,
-        num_workers=args.num_workers
-    )
-
-    # Define the model
-    model = Model(
-        in_channels=3,  # RGB images
-        n_classes=19,  # 19 classes in the Cityscapes dataset
-    ).to(device)
-
-    # Define the loss function
-    criterion = nn.CrossEntropyLoss(ignore_index=255)  # Ignore the void class
-
-    # Define the optimizer
-    optimizer = AdamW(model.parameters(), lr=args.lr)
-
-    # Training loop
-    best_valid_loss = float('inf')
-    current_best_model_path = None
-    for epoch in range(args.epochs):
-        print(f"Epoch {epoch+1:04}/{args.epochs:04}")
-
-        # Training
-        model.train()
-        for i, (images, labels) in enumerate(train_dataloader):
-
-            labels = convert_to_train_id(labels)  # Convert class IDs to train IDs
-            images, labels = images.to(device), labels.to(device)
-
-            labels = labels.long().squeeze(1)  # Remove channel dimension
-
-            optimizer.zero_grad()
-            outputs = model(images)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
-
-            wandb.log({
-                "train_loss": loss.item(),
-                "learning_rate": optimizer.param_groups[0]['lr'],
-                "epoch": epoch + 1,
-            }, step=epoch * len(train_dataloader) + i)
-            
-        # Validation
-        model.eval()
-        with torch.no_grad():
-            losses = []
-            for i, (images, labels) in enumerate(valid_dataloader):
-
-                labels = convert_to_train_id(labels)  # Convert class IDs to train IDs
-                images, labels = images.to(device), labels.to(device)
-
-                labels = labels.long().squeeze(1)  # Remove channel dimension
-
-                outputs = model(images)
-                loss = criterion(outputs, labels)
-                losses.append(loss.item())
-            
-                if i == 0:
-                    predictions = outputs.softmax(1).argmax(1)
-
-                    predictions = predictions.unsqueeze(1)
-                    labels = labels.unsqueeze(1)
-
-                    predictions = convert_train_id_to_color(predictions)
-                    labels = convert_train_id_to_color(labels)
-
-                    predictions_img = make_grid(predictions.cpu(), nrow=8)
-                    labels_img = make_grid(labels.cpu(), nrow=8)
-
-                    predictions_img = predictions_img.permute(1, 2, 0).numpy()
-                    labels_img = labels_img.permute(1, 2, 0).numpy()
-
-                    wandb.log({
-                        "predictions": [wandb.Image(predictions_img)],
-                        "labels": [wandb.Image(labels_img)],
-                    }, step=(epoch + 1) * len(train_dataloader) - 1)
-            
-            valid_loss = sum(losses) / len(losses)
-            wandb.log({
-                "valid_loss": valid_loss
-            }, step=(epoch + 1) * len(train_dataloader) - 1)
-
-            if valid_loss < best_valid_loss:
-                best_valid_loss = valid_loss
-                if current_best_model_path:
-                    os.remove(current_best_model_path)
-                current_best_model_path = os.path.join(
-                    output_dir, 
-                    f"best_model-epoch={epoch:04}-val_loss={valid_loss:04}.pt"
-                )
-                torch.save(model.state_dict(), current_best_model_path)
+    if not os.path.exists(args.data_dir):
+        from huggingface_hub import snapshot_download 
+        from dotenv import load_dotenv, find_dotenv
         
-    print("Training complete!")
+        print("Data not found locally. Downloading folders from Hugging Face...")
+        
+        load_dotenv(find_dotenv())
+        hf_token = os.getenv("HF_TOKEN")
+        
+        if not hf_token:
+            raise ValueError("Could not find HF_TOKEN in .env file! Make sure it is set.")
 
-    # Save the model
-    torch.save(
-        model.state_dict(),
-        os.path.join(
-            output_dir,
-            f"final_model-epoch={epoch:04}-val_loss={valid_loss:04}.pt"
+        # Download the repo contents directly into your ./data folder!
+        snapshot_download(
+            repo_id="TimJaspersTue/RARE25-train", 
+            repo_type="dataset",
+            local_dir=args.data_dir, 
+            token=hf_token      
         )
-    )
-    wandb.finish()
+        print("Data downloaded successfully.")
+    # ----------------------------------------------------------------------------------------------------- DATA PREPARATION 
+    # Standard: resize to 224x224 (quite standard), we can change it later!
+    transform = Compose([
+        ToImage(),
+        Resize((224, 224)), 
+        ToDtype(torch.float32, scale=True),
+        Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) # Normalization of the colour channels (standard)
+    ])
 
+    # <<!-- We can add more transformations here if you want to experiment with data augmentation. -->
+
+    # --------------------------------------------------------------------------------------------- COMBINE DATASETS AND SPLIT
+    # ImageFolder will automatically assign labels based on folder names (ndbe=0, neo=1).
+    centers = [f for f in os.listdir(args.data_dir) if f.startswith('center')]
+    train_datasets = []
+    valid_datasets = []
+    
+    for center in centers:
+        center_path = os.path.join(args.data_dir, center)
+        ds = ImageFolder(root=center_path, transform=transform)
+            
+        # SAFETY CHECK: Ensure labels are consistently 0=ndbe, 1=neo across all centers!
+        assert ds.class_to_idx == {'ndbe': 0, 'neo': 1}, f"CRITICAL WARNING: Class mapping in {center} is backwards or broken: {ds.class_to_idx}"
+
+        # STRATIFIED SPLIT: Split this specific center while maintaining ndbe/neo ratios
+        # We extract ds.targets (the labels) to tell sklearn how to balance the split
+        train_idx, val_idx = train_test_split(
+            range(len(ds)), 
+            train_size=args.DatasetSplit / 100.0, 
+            stratify=ds.targets, 
+            random_state=args.seed
+            )
+            
+        # Append the subsets to our lists
+        train_datasets.append(Subset(ds, train_idx))
+        valid_datasets.append(Subset(ds, val_idx))
+    
+    # Merge all the center subsets together
+    train_ds = ConcatDataset(train_datasets)
+    valid_ds = ConcatDataset(valid_datasets)
+
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+    valid_loader = DataLoader(valid_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+    
+    # >>>>>>>>>> FROM HERE IT SHOULD BE MODIFIED FOR THE MODEL IMPLEMENTATION, TRAINING AND EVALUATION. <<<<<<<<<<
+    # # MODEL SETUP ----------------------------------------------------------------------------------------------------------
+    # from model import Model # Uses the model in model.py. 
+    # model = Model(n_classes=2).to(device) # We only have 2 classes: ndbe and neo.
+    
+    # # CrossEntropyLoss is the standard for classification.
+    # criterion = nn.CrossEntropyLoss()
+    # optimizer = AdamW(model.parameters(), lr=args.lr)
+
+    # # ------------------------------------------------------------------------------------------------------- TRAINING LOOP
+    # best_valid_loss = float('inf')
+
+    # for epoch in range(args.epochs):
+    #     # TRAINING
+    #     model.train()
+    #     epoch_loss = 0
+        
+    #     for images, labels in train_loader:
+    #         images, labels = images.to(device), labels.to(device)
+            
+    #         optimizer.zero_grad()      # Reset math from last step
+    #         outputs = model(images)     # Guess what the image is
+    #         loss = criterion(outputs, labels) # See how wrong the guess was
+    #         loss.backward()            # Calculate how to improve
+    #         optimizer.step()           # Actually improve the weights
+            
+    #         epoch_loss += loss.item()
+    #     avg_train_loss = epoch_loss / len(train_loader)
+
+    #     # VALIDATION 
+    #     model.eval()
+    #     valid_loss = 0
+    #     correct_predictions = 0
+    #     total_predictions = 0
+    #     with torch.no_grad():
+    #         for images, labels in valid_loader:
+    #             images, labels = images.to(device), labels.to(device)
+    #             outputs = model(images)
+    #             loss = criterion(outputs, labels)
+    #             valid_loss += loss.item()
+                
+    #             # Calculate accuracy
+    #             _, predicted = torch.max(outputs.data, 1)
+    #             total_predictions += labels.size(0)
+    #             correct_predictions += (predicted == labels).sum().item()
+    #     avg_valid_loss = valid_loss / len(valid_loader)
+    #     valid_accuracy = correct_predictions / total_predictions
+
+    #     # Log our progress to WandB
+    #     wandb.log({
+    #         "train_loss": avg_train_loss,
+    #         "valid_loss": avg_valid_loss,
+    #         "valid_accuracy": valid_accuracy,
+    #         "epoch": epoch + 1
+    #     })
+        
+    #     print(f"Epoch {epoch+1:02d}/{args.epochs} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_valid_loss:.4f} | Val Acc: {valid_accuracy:.4f}")
+
+    #     # MODEL SAVING
+    #     # If the model improved on the validation set, save it!
+    #     if avg_valid_loss < best_valid_loss:
+    #         best_valid_loss = avg_valid_loss
+    #         save_path = os.path.join(args.save_dir, f"{args.experiment_id}_best.pt")
+    #         torch.save(model.state_dict(), save_path)
+    #         print(f"   -> Saved new best model to {save_path}")
+
+    # # Save final model state after all epochs finish
+    # final_save_path = os.path.join(args.save_dir, f"{args.experiment_id}_final.pt")
+    # torch.save(model.state_dict(), final_save_path)
+
+    # print("Training finished! Check your WandB dashboard.")
+    # wandb.finish()
 
 if __name__ == "__main__":
-    parser = get_args_parser()
-    args = parser.parse_args()
-    main(args)
+    main(get_args_parser().parse_args())
