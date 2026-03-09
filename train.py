@@ -31,6 +31,11 @@ def get_args_parser():
     parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducibility")
     parser.add_argument("--experiment-id", type=str, default="rare25-test-run")
     parser.add_argument("--save-dir", type=str, default="./checkpoints", help="Where to save the trained model")
+    parser.add_argument("--centers", nargs="+", default=None, help="Optional list of centers to use, e.g. --centers center_1")
+    parser.add_argument("--backbone-name", type=str, default="vit_base_patch16_dinov3", help="timm DinoV3 backbone name")
+    parser.add_argument("--pretrained", action="store_true", help="Use pretrained DinoV3 weights")
+    parser.add_argument("--no-pretrained", action="store_false", dest="pretrained", help="Disable pretrained DinoV3 weights")
+    parser.set_defaults(pretrained=True)
     return parser
 
 def main(args):
@@ -51,12 +56,20 @@ def main(args):
 
     if not os.path.exists(args.data_dir):
         from huggingface_hub import snapshot_download 
-        from dotenv import load_dotenv, find_dotenv
         
         print("Data not found locally. Downloading folders from Hugging Face...")
-        
-        load_dotenv(find_dotenv())
+
         hf_token = os.getenv("HF_TOKEN")
+
+        if not hf_token:
+            env_path = os.path.join(os.path.dirname(__file__), ".env")
+            if os.path.exists(env_path):
+                with open(env_path, "r", encoding="utf-8") as env_file:
+                    for line in env_file:
+                        stripped = line.strip()
+                        if stripped.startswith("HF_TOKEN="):
+                            hf_token = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                            break
         
         if not hf_token:
             raise ValueError("Could not find HF_TOKEN in .env file! Make sure it is set.")
@@ -82,7 +95,27 @@ def main(args):
 
     # --------------------------------------------------------------------------------------------- COMBINE DATASETS AND SPLIT
     # ImageFolder will automatically assign labels based on folder names (ndbe=0, neo=1).
-    centers = [f for f in os.listdir(args.data_dir) if f.startswith('center')]
+    discovered_centers = [
+        f for f in os.listdir(args.data_dir)
+        if f.startswith('center') and os.path.isdir(os.path.join(args.data_dir, f))
+    ]
+
+    if args.centers is not None:
+        unknown_centers = sorted(set(args.centers) - set(discovered_centers))
+        if unknown_centers:
+            raise ValueError(
+                f"Requested centers not found: {unknown_centers}. Available centers: {sorted(discovered_centers)}"
+            )
+        centers = args.centers
+    else:
+        centers = discovered_centers
+
+    if len(centers) == 0:
+        raise ValueError(
+            f"No center folders found in {args.data_dir}. Expected folders like 'center_1', 'center_2'."
+        )
+
+    print(f"Using centers: {centers}")
     train_datasets = []
     valid_datasets = []
     
@@ -113,78 +146,94 @@ def main(args):
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
     valid_loader = DataLoader(valid_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
     
-    # >>>>>>>>>> FROM HERE IT SHOULD BE MODIFIED FOR THE MODEL IMPLEMENTATION, TRAINING AND EVALUATION. <<<<<<<<<<
-    # # MODEL SETUP ----------------------------------------------------------------------------------------------------------
-    # from model import Model # Uses the model in model.py. 
-    # model = Model(n_classes=2).to(device) # We only have 2 classes: ndbe and neo.
-    
-    # # CrossEntropyLoss is the standard for classification.
-    # criterion = nn.CrossEntropyLoss()
-    # optimizer = AdamW(model.parameters(), lr=args.lr)
+    # MODEL SETUP ----------------------------------------------------------------------------------------------------------
+    from model import Model
 
-    # # ------------------------------------------------------------------------------------------------------- TRAINING LOOP
-    # best_valid_loss = float('inf')
+    class_names = train_datasets[0].dataset.classes
+    n_classes = len(class_names)
 
-    # for epoch in range(args.epochs):
-    #     # TRAINING
-    #     model.train()
-    #     epoch_loss = 0
-        
-    #     for images, labels in train_loader:
-    #         images, labels = images.to(device), labels.to(device)
-            
-    #         optimizer.zero_grad()      # Reset math from last step
-    #         outputs = model(images)     # Guess what the image is
-    #         loss = criterion(outputs, labels) # See how wrong the guess was
-    #         loss.backward()            # Calculate how to improve
-    #         optimizer.step()           # Actually improve the weights
-            
-    #         epoch_loss += loss.item()
-    #     avg_train_loss = epoch_loss / len(train_loader)
+    model = Model(
+        in_channels=3,
+        n_classes=n_classes,
+        backbone_name=args.backbone_name,
+        pretrained=args.pretrained,
+    ).to(device)
 
-    #     # VALIDATION 
-    #     model.eval()
-    #     valid_loss = 0
-    #     correct_predictions = 0
-    #     total_predictions = 0
-    #     with torch.no_grad():
-    #         for images, labels in valid_loader:
-    #             images, labels = images.to(device), labels.to(device)
-    #             outputs = model(images)
-    #             loss = criterion(outputs, labels)
-    #             valid_loss += loss.item()
-                
-    #             # Calculate accuracy
-    #             _, predicted = torch.max(outputs.data, 1)
-    #             total_predictions += labels.size(0)
-    #             correct_predictions += (predicted == labels).sum().item()
-    #     avg_valid_loss = valid_loss / len(valid_loader)
-    #     valid_accuracy = correct_predictions / total_predictions
+    criterion = nn.CrossEntropyLoss()
+    optimizer = AdamW(model.parameters(), lr=args.lr)
 
-    #     # Log our progress to WandB
-    #     wandb.log({
-    #         "train_loss": avg_train_loss,
-    #         "valid_loss": avg_valid_loss,
-    #         "valid_accuracy": valid_accuracy,
-    #         "epoch": epoch + 1
-    #     })
-        
-    #     print(f"Epoch {epoch+1:02d}/{args.epochs} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_valid_loss:.4f} | Val Acc: {valid_accuracy:.4f}")
+    # TRAINING LOOP --------------------------------------------------------------------------------------------------------
+    best_valid_loss = float('inf')
 
-    #     # MODEL SAVING
-    #     # If the model improved on the validation set, save it!
-    #     if avg_valid_loss < best_valid_loss:
-    #         best_valid_loss = avg_valid_loss
-    #         save_path = os.path.join(args.save_dir, f"{args.experiment_id}_best.pt")
-    #         torch.save(model.state_dict(), save_path)
-    #         print(f"   -> Saved new best model to {save_path}")
+    for epoch in range(args.epochs):
+        model.train()
+        train_loss = 0.0
+        train_correct = 0
+        train_total = 0
 
-    # # Save final model state after all epochs finish
-    # final_save_path = os.path.join(args.save_dir, f"{args.experiment_id}_final.pt")
-    # torch.save(model.state_dict(), final_save_path)
+        for images, labels in train_loader:
+            images, labels = images.to(device), labels.to(device)
 
-    # print("Training finished! Check your WandB dashboard.")
-    # wandb.finish()
+            optimizer.zero_grad()
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            train_loss += loss.item() * images.size(0)
+            predictions = torch.argmax(outputs, dim=1)
+            train_correct += (predictions == labels).sum().item()
+            train_total += labels.size(0)
+
+        avg_train_loss = train_loss / train_total
+        train_accuracy = train_correct / train_total
+
+        model.eval()
+        valid_loss = 0.0
+        valid_correct = 0
+        valid_total = 0
+
+        with torch.no_grad():
+            for images, labels in valid_loader:
+                images, labels = images.to(device), labels.to(device)
+                outputs = model(images)
+                loss = criterion(outputs, labels)
+
+                valid_loss += loss.item() * images.size(0)
+                predictions = torch.argmax(outputs, dim=1)
+                valid_correct += (predictions == labels).sum().item()
+                valid_total += labels.size(0)
+
+        avg_valid_loss = valid_loss / valid_total
+        valid_accuracy = valid_correct / valid_total
+
+        wandb.log({
+            "epoch": epoch + 1,
+            "learning_rate": optimizer.param_groups[0]["lr"],
+            "train_loss": avg_train_loss,
+            "train_accuracy": train_accuracy,
+            "valid_loss": avg_valid_loss,
+            "valid_accuracy": valid_accuracy,
+        })
+
+        print(
+            f"Epoch {epoch + 1:02d}/{args.epochs} | "
+            f"Train Loss: {avg_train_loss:.4f} | Train Acc: {train_accuracy:.4f} | "
+            f"Val Loss: {avg_valid_loss:.4f} | Val Acc: {valid_accuracy:.4f}"
+        )
+
+        if avg_valid_loss < best_valid_loss:
+            best_valid_loss = avg_valid_loss
+            save_path = os.path.join(args.save_dir, f"{args.experiment_id}_best.pt")
+            torch.save(model.state_dict(), save_path)
+            print(f"   -> Saved new best model to {save_path}")
+
+    final_save_path = os.path.join(args.save_dir, f"{args.experiment_id}_final.pt")
+    torch.save(model.state_dict(), final_save_path)
+
+    print(f"Class mapping: {class_names}")
+    print("Training finished! Check your WandB dashboard.")
+    wandb.finish()
 
 if __name__ == "__main__":
     main(get_args_parser().parse_args())
