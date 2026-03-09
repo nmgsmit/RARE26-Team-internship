@@ -1,5 +1,3 @@
-wandb login
-
 python3 train.py \
     --data-dir ./data/Challenge_train_data \
     --centers center_1 \
