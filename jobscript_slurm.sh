@@ -14,7 +14,7 @@ fi
 export WANDB_API_KEY
 
 # Load Python module
-module load Python/3.11.3-GCCcore-12.3.0  # adjust to available Python module
+module load 2023  # adjust to available Python module
 
 # Create/activate virtual environment
 if [ ! -d "venv" ]; then
