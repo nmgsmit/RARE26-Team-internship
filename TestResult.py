@@ -28,7 +28,7 @@ def parse_args():
 	parser.add_argument(
 		"--images-dir",
 		type=str,
-		default="../data/EVC_Barretts_FullSet/images",
+		default="data/EVC_Barretts_FullSet/images",
 		help="Directory containing EVC images named like patXX_imY_ACHD.png or patXX_imY_NDBT.png.",
 	)
 	parser.add_argument(
