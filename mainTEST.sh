@@ -5,8 +5,10 @@ set -euo pipefail
 #   /bin/bash mainTEST.sh /path/to/checkpoint.pt
 # or set MODEL_PATH in environment before running.
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 MODEL_PATH="${1:-${MODEL_PATH:-}}"
-IMAGES_DIR="${IMAGES_DIR:-../data/EVC_Barretts_FullSet/images}"
+IMAGES_DIR="${IMAGES_DIR:-"$SCRIPT_DIR/../data/EVC_Barretts_FullSet/images"}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 IMAGE_SIZE="${IMAGE_SIZE:-224}"
 BACKBONE_NAME="${BACKBONE_NAME:-vit_base_patch16_dinov3}"
