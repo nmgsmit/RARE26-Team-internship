@@ -23,7 +23,7 @@ class Model(nn.Module):
         super().__init__()
 
         self.in_channels = in_channels
-
+# Transfer learning: set DINOv3 backbone, put num_classes to 0 to remove output layer
         self.backbone = timm.create_model(
             backbone_name,
             pretrained=pretrained,
@@ -35,13 +35,16 @@ class Model(nn.Module):
 
     def forward(self, x):
         """Forward pass returning classification logits of shape (B, n_classes)."""
+# Check if input channel is RGB
         if x.shape[1] != self.in_channels:
             raise ValueError(f"Expected {self.in_channels} input channels, but got {x.shape[1]}")
+# Get image features using the DINOv3 Backbone
         features = self.backbone(x)
-
+# Get correct output of features
         if features.ndim == 4:
             features = features.mean(dim=(2, 3))
         elif features.ndim == 3:
             features = features[:, 0]
-
+    
+# Put a binary classifier over the features
         return self.classifier(features)
