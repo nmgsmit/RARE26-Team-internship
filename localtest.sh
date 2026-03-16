@@ -28,7 +28,6 @@ fi
 #   sbatch localtest.sh /path/to/checkpoint.pt
 # or set MODEL_PATH in environment before running.
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 MODEL_PATH="${1:-${MODEL_PATH:-}}"
 
@@ -45,4 +44,4 @@ fi
 
 # All test config variables are defined in mainTEST.sh (similar to main.sh for training).
 export MODEL_PATH
-/bin/bash "$SCRIPT_DIR/mainTEST.sh" "$MODEL_PATH"
+/bin/bash "mainTEST.sh" "$MODEL_PATH"
