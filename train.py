@@ -35,6 +35,17 @@ def get_args_parser():
     parser.add_argument("--backbone-name", type=str, default="vit_base_patch16_dinov3", help="timm DinoV3 backbone name")
     parser.add_argument("--pretrained", action="store_true", help="Use pretrained DinoV3 weights")
     parser.add_argument("--no-pretrained", action="store_false", dest="pretrained", help="Disable pretrained DinoV3 weights")
+    parser.add_argument(
+        "--debug-center1-balanced",
+        action="store_true",
+        help="Use only center_1 and cap both classes to --debug-class-count samples for quick sanity checks",
+    )
+    parser.add_argument(
+        "--debug-class-count",
+        type=int,
+        default=61,
+        help="Number of samples per class used when --debug-center1-balanced is enabled",
+    )
     parser.set_defaults(pretrained=True)
     return parser
 
@@ -110,6 +121,13 @@ def main(args):
     else:
         centers = discovered_centers
 
+    if args.debug_center1_balanced:
+        if "center_1" not in discovered_centers:
+            raise ValueError(
+                f"debug mode requires center_1 in {args.data_dir}. Available centers: {sorted(discovered_centers)}"
+            )
+        centers = ["center_1"]
+
     if len(centers) == 0:
         raise ValueError(
             f"No center folders found in {args.data_dir}. Expected folders like 'center_1', 'center_2'."
@@ -126,12 +144,33 @@ def main(args):
         # SAFETY CHECK: Ensure labels are consistently 0=ndbe, 1=neo across all centers!
         assert ds.class_to_idx == {'ndbe': 0, 'neo': 1}, f"CRITICAL WARNING: Class mapping in {center} is backwards or broken: {ds.class_to_idx}"
 
+        if args.debug_center1_balanced and center == "center_1":
+            ndbe_label = ds.class_to_idx["ndbe"]
+            neo_label = ds.class_to_idx["neo"]
+            ndbe_indices = [idx for idx, label in enumerate(ds.targets) if label == ndbe_label][:args.debug_class_count]
+            neo_indices = [idx for idx, label in enumerate(ds.targets) if label == neo_label][:args.debug_class_count]
+
+            if len(ndbe_indices) < args.debug_class_count or len(neo_indices) < args.debug_class_count:
+                raise ValueError(
+                    f"center_1 needs at least {args.debug_class_count} samples per class, found ndbe={len(ndbe_indices)} neo={len(neo_indices)}"
+                )
+
+            selected_indices = ndbe_indices + neo_indices
+            selected_targets = [ds.targets[idx] for idx in selected_indices]
+            print(
+                f"Debug subset active: center_1 with {len(ndbe_indices)} ndbe + {len(neo_indices)} neo "
+                f"= {len(selected_indices)} total samples"
+            )
+        else:
+            selected_indices = list(range(len(ds)))
+            selected_targets = ds.targets
+
         # STRATIFIED SPLIT: Split this specific center while maintaining ndbe/neo ratios
-        # We extract ds.targets (the labels) to tell sklearn how to balance the split
+        # We split over selected_indices so debug mode can cap class counts first.
         train_idx, val_idx = train_test_split(
-            range(len(ds)), 
+            selected_indices,
             train_size=args.DatasetSplit / 100.0, 
-            stratify=ds.targets, 
+            stratify=selected_targets,
             random_state=args.seed
             )
             
