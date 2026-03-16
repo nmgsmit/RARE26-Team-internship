@@ -6,7 +6,6 @@
 #SBATCH --partition=gpu_a100
 #SBATCH --time=04:00:00
 #SBATCH --output=slurm_trainmodel/slurm-%j.out
-#SBATCH --error=slurm_trainmodel/slurm-%j.err
 
 set -euo pipefail
 mkdir -p slurm_trainmodel
@@ -31,27 +30,5 @@ else
     source venv/bin/activate
 fi
 
-# JOB_MODE controls what this script executes.
-# Train (default):
-#   sbatch jobscript_slurm.sh
-# Test on checkpoint:
-#   sbatch --export=ALL,JOB_MODE=test,MODEL_PATH=./checkpoints/your_model.pt jobscript_slurm.sh
-# Optional test overrides:
-#   IMAGES_DIR=./data/EVC_Barretts_FullSet/images
-#   IMAGE_SIZE=224
-#   BATCH_SIZE=32
-#   BACKBONE_NAME=vit_base_patch16_dinov3
-#   THRESHOLD=0.5
-#   PRETRAINED_FLAG=0
-JOB_MODE="${JOB_MODE:-train}"
-
-if [ "$JOB_MODE" = "test" ]; then
-    if [ -z "${MODEL_PATH:-}" ]; then
-        echo "ERROR: JOB_MODE=test requires MODEL_PATH."
-        echo "Submit with: sbatch --export=ALL,JOB_MODE=test,MODEL_PATH=./checkpoints/<your_model>.pt jobscript_slurm.sh"
-        exit 1
-    fi
-    /bin/bash mainTEST.sh "$MODEL_PATH"
-else
-    /bin/bash main.sh
-fi
+# Run training
+/bin/bash main.sh

@@ -8,12 +8,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 MODEL_PATH="${1:-${MODEL_PATH:-}}"
+
+# -------------------------------------------------------------------------------------------------
+# Test settings: edit these defaults here, similar to main.sh for training.
 IMAGES_DIR="${IMAGES_DIR:-$SCRIPT_DIR/data/EVC_Barretts_FullSet/images}"
 IMAGE_SIZE="${IMAGE_SIZE:-224}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 BACKBONE_NAME="${BACKBONE_NAME:-vit_base_patch16_dinov3}"
 THRESHOLD="${THRESHOLD:-0.5}"
-PRETRAINED_FLAG="${PRETRAINED_FLAG:-0}"
+PRETRAINED_FLAG="${PRETRAINED_FLAG:-0}"  # 1 -> --pretrained, 0 -> --no-pretrained
+# -------------------------------------------------------------------------------------------------
 
 if [ -z "$MODEL_PATH" ]; then
     echo "ERROR: No model checkpoint path provided."
@@ -35,20 +39,16 @@ echo "  BACKBONE_NAME=$BACKBONE_NAME"
 echo "  THRESHOLD=$THRESHOLD"
 echo "  PRETRAINED_FLAG=$PRETRAINED_FLAG"
 
-CMD=(
-    python3 TestResult.py
-    --model-path "$MODEL_PATH"
-    --images-dir "$IMAGES_DIR"
-    --image-size "$IMAGE_SIZE"
-    --batch-size "$BATCH_SIZE"
-    --backbone-name "$BACKBONE_NAME"
-    --threshold "$THRESHOLD"
-)
-
+PRETRAINED_ARG="--no-pretrained"
 if [ "$PRETRAINED_FLAG" = "1" ]; then
-    CMD+=(--pretrained)
-elif [ "$PRETRAINED_FLAG" = "0" ]; then
-    CMD+=(--no-pretrained)
+    PRETRAINED_ARG="--pretrained"
 fi
 
-"${CMD[@]}"
+python3 TestResult.py \
+    --model-path "$MODEL_PATH" \
+    --images-dir "$IMAGES_DIR" \
+    --image-size "$IMAGE_SIZE" \
+    --batch-size "$BATCH_SIZE" \
+    --backbone-name "$BACKBONE_NAME" \
+    --threshold "$THRESHOLD" \
+    "$PRETRAINED_ARG"

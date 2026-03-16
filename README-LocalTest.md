@@ -6,7 +6,7 @@ This guide explains how to run `localtest.sh` locally to evaluate a checkpoint w
 
 `localtest.sh`:
 - validates your checkpoint path,
-- passes runtime settings to `TestResult.py`,
+- calls `mainTEST.sh`, which holds the editable test settings and runs `TestResult.py`,
 - runs evaluation and prints:
   - AUROC, AUPRC,
   - Precision, Recall, F1,
@@ -24,7 +24,7 @@ sbatch localtest.sh ./checkpoints/<your_model>.pt
 Equivalent using environment variable:
 
 ```bash
-MODEL_PATH=./checkpoints/<your_model>.pt /bin/bash localtest.sh
+MODEL_PATH=./checkpoints/<your_model>.pt sbatch localtest.sh
 ```
 
 ## Standard settings
@@ -41,7 +41,7 @@ If you do not pass any overrides, these defaults are used:
 So the most standard run is:
 
 ```bash
-/bin/bash localtest.sh ./checkpoints/<your_model>.pt
+sbatch localtest.sh ./checkpoints/<your_model>.pt
 ```
 
 ## Optional overrides
@@ -55,15 +55,17 @@ BATCH_SIZE=32 \
 BACKBONE_NAME=vit_base_patch16_dinov3 \
 THRESHOLD=0.5 \
 PRETRAINED_FLAG=0 \
-/bin/bash localtest.sh ./checkpoints/<your_model>.pt
+sbatch localtest.sh ./checkpoints/<your_model>.pt
 ```
+
+These defaults are defined in `mainTEST.sh` under the `Test settings` block.
 
 ### How to override exactly
 
 Use this pattern:
 
 ```bash
-VAR1=value1 VAR2=value2 /bin/bash localtest.sh ./checkpoints/<your_model>.pt
+VAR1=value1 VAR2=value2 sbatch localtest.sh ./checkpoints/<your_model>.pt
 ```
 
 Rules:
@@ -75,7 +77,7 @@ Examples:
 Override only backbone:
 
 ```bash
-BACKBONE_NAME=vit_large_patch14_dinov2 /bin/bash localtest.sh ./checkpoints/<your_model>.pt
+BACKBONE_NAME=vit_large_patch14_dinov2 sbatch localtest.sh ./checkpoints/<your_model>.pt
 ```
 
 Meaning of overrides:
