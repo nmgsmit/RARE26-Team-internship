@@ -18,7 +18,7 @@ This guide explains how to run `localtest.sh` locally to evaluate a checkpoint w
 From the repository root:
 
 ```bash
-/bin/bash localtest.sh ./checkpoints/<your_model>.pt
+sbatch localtest.sh ./checkpoints/<your_model>.pt
 ```
 
 Equivalent using environment variable:
