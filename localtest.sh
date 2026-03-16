@@ -8,8 +8,22 @@
 
 set -euo pipefail
 
+# Load Python module
+module load 2023 # adjust to available Python module
+
+# Create/activate virtual environment
+if [ ! -d "venv" ]; then
+    python -m venv venv
+    source venv/bin/activate
+    pip install --upgrade pip
+    pip install -r requirements.txt
+else
+    source venv/bin/activate
+fi
+
+
 # Usage:
-#   /bin/bash localtest.sh /path/to/checkpoint.pt
+#   sbatch localtest.sh /path/to/checkpoint.pt
 # or set MODEL_PATH in environment before running.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
