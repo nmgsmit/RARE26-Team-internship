@@ -5,8 +5,11 @@
 #SBATCH --gpus=1
 #SBATCH --partition=gpu_a100
 #SBATCH --time=04:00:00
+#SBATCH --output=slurm_trainmodel/slurm-%j.out
+#SBATCH --error=slurm_trainmodel/slurm-%j.err
 
 set -euo pipefail
+mkdir -p slurm_trainmodel
 
 if [ -f ".env" ]; then
     WANDB_API_KEY=$(grep '^WANDB_API_KEY=' .env | head -n 1 | cut -d= -f2- | tr -d '\r' | xargs)

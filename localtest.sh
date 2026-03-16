@@ -5,8 +5,11 @@
 #SBATCH --gpus=1
 #SBATCH --partition=gpu_a100
 #SBATCH --time=01:00:00
+#SBATCH --output=slurm_testmodel/slurm-%j.out
+#SBATCH --error=slurm_testmodel/slurm-%j.err
 
 set -euo pipefail
+mkdir -p slurm_testmodel
 
 # Load Python module
 module load 2023 # adjust to available Python module

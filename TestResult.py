@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from PIL import Image
 from sklearn.metrics import average_precision_score, confusion_matrix, f1_score, precision_score, recall_score, roc_auc_score
+from torch.utils.data import DataLoader, Dataset
 from torchvision.transforms.v2 import Compose, Normalize, Resize, ToDtype, ToImage
 from tqdm import tqdm
 
@@ -124,30 +125,35 @@ def infer_label_from_filename(image_path):
 	)
 
 
-def load_batch(paths, transform, device):
-	images = []
-	for img_path in paths:
-		img = Image.open(img_path).convert("RGB")
-		images.append(transform(img))
-	return torch.stack(images, dim=0).to(device)
+class EVCDataset(Dataset):
+	def __init__(self, image_paths, transform):
+		self.image_paths = image_paths
+		self.transform = transform
+		self.labels = [infer_label_from_filename(p) for p in image_paths]
+
+	def __len__(self):
+		return len(self.image_paths)
+
+	def __getitem__(self, idx):
+		img = Image.open(self.image_paths[idx]).convert("RGB")
+		return self.transform(img), self.labels[idx]
 
 
 def evaluate(model, image_paths, transform, device, batch_size):
+	dataset = EVCDataset(image_paths, transform)
+	loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
+
 	y_true = []
 	y_score = []
 
 	model.eval()
 	with torch.no_grad():
-		for start in tqdm(range(0, len(image_paths), batch_size), desc="Evaluating"):
-			batch_paths = image_paths[start : start + batch_size]
-			inputs = load_batch(batch_paths, transform, device)
-			logits = model(inputs)
+		for images, labels in tqdm(loader, desc="Evaluating"):
+			images = images.to(device)
+			logits = model(images)
 			probs_achd = torch.softmax(logits, dim=1)[:, 1].cpu().numpy().tolist()
-
-			for path, prob_achd in zip(batch_paths, probs_achd):
-				true_label = infer_label_from_filename(path)
-				y_true.append(true_label)
-				y_score.append(prob_achd)
+			y_true.extend(labels.tolist())
+			y_score.extend(probs_achd)
 
 	return np.array(y_true), np.array(y_score)
 
