@@ -6,6 +6,11 @@ checkpoints/
 wandb/
 .env
 
+# Large artifacts
+*.tar
+*.pt
+Submission_files/model.pt
+
 # Python Environments
 .venv/
 venv/
