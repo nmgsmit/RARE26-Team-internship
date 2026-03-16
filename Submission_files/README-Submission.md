@@ -53,7 +53,7 @@ Copy-Item "checkpoints\<experiment-id>.pt" "Submission_files\model.pt"
 From repo root:
 
 ```bash
-docker build -t nncv-submission:latest -f Submission_files/Dockerfile Submission_files
+docker build -t team-internship:latest -f Submission_files/Dockerfile Submission_files
 ```
 
 This creates a self-contained image with:
@@ -63,7 +63,7 @@ This creates a self-contained image with:
 
 ---
 
-## 4. Test locally before exporting
+## 4. IGNORE - Test locally before exporting - NOT WORKING CURRENTLY
 
 Create local folders:
 - `./local_data` with `.png` images
@@ -72,19 +72,13 @@ Create local folders:
 Run (Linux/macOS shell):
 
 ```bash
-docker run --rm \
-  -v "$(pwd)/local_data:/data" \
-  -v "$(pwd)/local_output:/output" \
-  nncv-submission:latest
+docker run --rm -v "$(pwd)/data/EVC_Barretts_FullSet/images:/data/test" -v "$(pwd)/local_output:/output" team-internship:latest
 ```
 
 Run (Windows PowerShell):
 
 ```powershell
-docker run --rm `
-  -v "${PWD}\local_data:/data" `
-  -v "${PWD}\local_output:/output" `
-  nncv-submission:latest
+docker run --rm -v "${PWD}\data\EVC_Barretts_FullSet\images:/data/test" -v "${PWD}\local_output:/output" team-internship:latest
 ```
 
 Expected behavior:
@@ -96,10 +90,10 @@ Expected behavior:
 ## 5. Export image to `.tar` for submission
 
 ```bash
-docker save -o nncv_submission.tar nncv-submission:latest
+docker save -o RARE26-submission.tar team-internship:latest
 ```
 
-You then submit `nncv_submission.tar`.
+You then submit `RARE26-submission.tar`.
 
 ---
 
@@ -109,26 +103,8 @@ To be added.
 
 ---
 
-## 7. Recommended workflow per benchmark
 
-- Keep one stable baseline image/tag.
-- Create separate model variants per benchmark.
-- Export each as a separate tar, for example:
-  - `submission_baseline_peak.tar`
-  - `submission_robustness.tar`
-  - `submission_efficiency.tar`
-  - `submission_ood.tar`
-
-Example:
-
-```bash
-docker build -t nncv-submission:efficiency -f Submission_files/Dockerfile Submission_files
-docker save -o submission_efficiency.tar nncv-submission:efficiency
-```
-
----
-
-## 8. Common failure checks
+## 7. Common failure checks
 
 - `model.pt` missing from `Submission_files/` before build.
 - `model.pt` incompatible with `Model` in [model.py](model.py).
