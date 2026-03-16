@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Usage:
-#   /bin/bash mainTEST.sh /path/to/checkpoint.pt
+#   /bin/bash localtest.sh /path/to/checkpoint.pt
 # or set MODEL_PATH in environment before running.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,6 +47,8 @@ CMD=(
 
 if [ "$PRETRAINED_FLAG" = "1" ]; then
     CMD+=(--pretrained)
+elif [ "$PRETRAINED_FLAG" = "0" ]; then
+    CMD+=(--no-pretrained)
 fi
 
 "${CMD[@]}"

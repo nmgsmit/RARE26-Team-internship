@@ -1,10 +1,10 @@
 # Local Test Guide
 
-This guide explains how to run `main_localtest.sh` locally to evaluate a checkpoint with `TestResult.py`.
+This guide explains how to run `localtest.sh` locally to evaluate a checkpoint with `TestResult.py`.
 
 ## What this script does
 
-`main_localtest.sh`:
+`localtest.sh`:
 - validates your checkpoint path,
 - passes runtime settings to `TestResult.py`,
 - runs evaluation and prints:
@@ -18,13 +18,13 @@ This guide explains how to run `main_localtest.sh` locally to evaluate a checkpo
 From the repository root:
 
 ```bash
-/bin/bash main_localtest.sh ./checkpoints/<your_model>.pt
+/bin/bash localtest.sh ./checkpoints/<your_model>.pt
 ```
 
 Equivalent using environment variable:
 
 ```bash
-MODEL_PATH=./checkpoints/<your_model>.pt /bin/bash main_localtest.sh
+MODEL_PATH=./checkpoints/<your_model>.pt /bin/bash localtest.sh
 ```
 
 ## Standard settings
@@ -41,7 +41,7 @@ If you do not pass any overrides, these defaults are used:
 So the most standard run is:
 
 ```bash
-/bin/bash main_localtest.sh ./checkpoints/<your_model>.pt
+/bin/bash localtest.sh ./checkpoints/<your_model>.pt
 ```
 
 ## Optional overrides
@@ -55,7 +55,7 @@ BATCH_SIZE=32 \
 BACKBONE_NAME=vit_base_patch16_dinov3 \
 THRESHOLD=0.5 \
 PRETRAINED_FLAG=0 \
-/bin/bash main_localtest.sh ./checkpoints/<your_model>.pt
+/bin/bash localtest.sh ./checkpoints/<your_model>.pt
 ```
 
 ### How to override exactly
@@ -63,7 +63,7 @@ PRETRAINED_FLAG=0 \
 Use this pattern:
 
 ```bash
-VAR1=value1 VAR2=value2 /bin/bash main_localtest.sh ./checkpoints/<your_model>.pt
+VAR1=value1 VAR2=value2 /bin/bash localtest.sh ./checkpoints/<your_model>.pt
 ```
 
 Rules:
@@ -75,7 +75,7 @@ Examples:
 Override only backbone:
 
 ```bash
-BACKBONE_NAME=vit_large_patch14_dinov2 /bin/bash main_localtest.sh ./checkpoints/<your_model>.pt
+BACKBONE_NAME=vit_large_patch14_dinov2 /bin/bash localtest.sh ./checkpoints/<your_model>.pt
 ```
 
 Meaning of overrides:
@@ -84,7 +84,7 @@ Meaning of overrides:
 - `BATCH_SIZE`: inference batch size.
 - `BACKBONE_NAME`: timm backbone used to build model before loading checkpoint.
 - `THRESHOLD`: probability cutoff for positive class (ACHD).
-- `PRETRAINED_FLAG`: `1` to initialize backbone with pretrained weights before loading checkpoint, else `0`.
+- `PRETRAINED_FLAG`: `1` passes `--pretrained`, `0` passes `--no-pretrained`.
 
 ## Common issues
 

@@ -47,6 +47,8 @@ CMD=(
 
 if [ "$PRETRAINED_FLAG" = "1" ]; then
     CMD+=(--pretrained)
+elif [ "$PRETRAINED_FLAG" = "0" ]; then
+    CMD+=(--no-pretrained)
 fi
 
 "${CMD[@]}"
