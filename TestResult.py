@@ -58,12 +58,6 @@ def parse_args():
 		help="Path to a trained checkpoint (.pt/.pth) containing model.state_dict().",
 	)
 	parser.add_argument(
-		"--images-dir",
-		type=str,
-		default=str(IMAGES_DIR),
-		help="Directory containing input .png images.",
-	)
-	parser.add_argument(
 		"--image-size",
 		type=int,
 		default=IMAGE_SIZE,
@@ -179,13 +173,12 @@ def main():
 	args = parse_args()
 	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-	images_dir = Path(args.images_dir)
-	if not images_dir.exists():
-		raise FileNotFoundError(f"Images directory not found: {images_dir}")
+	if not IMAGES_DIR.exists():
+		raise FileNotFoundError(f"Images directory not found: {IMAGES_DIR}")
 
-	image_paths = sorted(images_dir.glob("*.png"))
+	image_paths = sorted(IMAGES_DIR.glob("*.png"))
 	if len(image_paths) == 0:
-		raise ValueError(f"No .png images found in {images_dir}")
+		raise ValueError(f"No .png images found in {IMAGES_DIR}")
 
 	model = Model(
 		in_channels=3,

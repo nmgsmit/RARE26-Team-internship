@@ -31,7 +31,7 @@ MODEL_PATH=./checkpoints/<your_model>.pt sbatch localtest.sh
 
 If you do not pass any overrides, these defaults are used:
 
-- `IMAGES_DIR=./data/EVC_Barretts_FullSet/images`
+- `IMAGES_DIR` is fixed to `./data/EVC_Barretts_FullSet/images`
 - `IMAGE_SIZE=224`
 - `BATCH_SIZE=32`
 - `BACKBONE_NAME=vit_base_patch16_dinov3`
@@ -49,7 +49,6 @@ sbatch localtest.sh ./checkpoints/<your_model>.pt
 You can override defaults without editing files:
 
 ```bash
-IMAGES_DIR=./data/EVC_Barretts_FullSet/images \
 IMAGE_SIZE=224 \
 BATCH_SIZE=32 \
 BACKBONE_NAME=vit_base_patch16_dinov3 \
@@ -69,7 +68,7 @@ VAR1=value1 VAR2=value2 sbatch localtest.sh ./checkpoints/<your_model>.pt
 ```
 
 Rules:
-- Put overrides before `/bin/bash ...` on the same line.
+- Put overrides before `sbatch ...` on the same line.
 - Overrides only affect that single command run.
 - If you do not set a variable, the script uses its default.
 
@@ -81,7 +80,6 @@ BACKBONE_NAME=vit_large_patch14_dinov2 sbatch localtest.sh ./checkpoints/<your_m
 ```
 
 Meaning of overrides:
-- `IMAGES_DIR`: folder with `.png` images.
 - `IMAGE_SIZE`: resize size used before inference.
 - `BATCH_SIZE`: inference batch size.
 - `BACKBONE_NAME`: timm backbone used to build model before loading checkpoint.

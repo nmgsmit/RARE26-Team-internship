@@ -11,7 +11,6 @@ MODEL_PATH="${1:-${MODEL_PATH:-}}"
 
 # -------------------------------------------------------------------------------------------------
 # Test settings: edit these defaults here, similar to main.sh for training.
-IMAGES_DIR="${IMAGES_DIR:-$SCRIPT_DIR/data/EVC_Barretts_FullSet/images}"
 IMAGE_SIZE="${IMAGE_SIZE:-224}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 BACKBONE_NAME="${BACKBONE_NAME:-vit_base_patch16_dinov3}"
@@ -32,7 +31,7 @@ fi
 
 echo "Running evaluation with:"
 echo "  MODEL_PATH=$MODEL_PATH"
-echo "  IMAGES_DIR=$IMAGES_DIR"
+echo "  IMAGES_DIR=./data/EVC_Barretts_FullSet/images"
 echo "  IMAGE_SIZE=$IMAGE_SIZE"
 echo "  BATCH_SIZE=$BATCH_SIZE"
 echo "  BACKBONE_NAME=$BACKBONE_NAME"
@@ -46,7 +45,6 @@ fi
 
 python3 TestResult.py \
     --model-path "$MODEL_PATH" \
-    --images-dir "$IMAGES_DIR" \
     --image-size "$IMAGE_SIZE" \
     --batch-size "$BATCH_SIZE" \
     --backbone-name "$BACKBONE_NAME" \
