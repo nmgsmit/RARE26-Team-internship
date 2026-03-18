@@ -8,4 +8,6 @@ python3 train.py \
     --lr 0.0001 \
     --num-workers 10 \
     --seed 42 \
-    --experiment-id "cnn-center1-training"
+    --experiment-id "dinov3-center1-training" \
+    --backbone-name Test_metrics \
+    --no-pretrained
