@@ -8,6 +8,6 @@ python3 train.py \
     --lr 0.0001 \
     --num-workers 10 \
     --seed 42 \
-    --experiment-id "Test Metrics" \
+    --experiment-id "struct_test" \
     --backbone-name vit_base_patch16_dinov3 \
     --no-pretrained
