@@ -372,7 +372,7 @@ def main(args):
     optimizer = AdamW(trainable_params, lr=args.lr)
 
     # TRAINING LOOP --------------------------------------------------------------------------------------------------------
-    best_valid_loss = float('inf')
+    best_ppv_at_90_recall = float('-inf')
 
     for epoch in range(args.epochs):
         model.train()
@@ -464,8 +464,8 @@ def main(args):
             f"Test AUPRC: {test_auprc:.4f} | Test AUROC: {test_auroc:.4f} | Test PPV@90R: {test_ppv_at_90_recall:.4f}"
         )
 
-        if avg_valid_loss < best_valid_loss:
-            best_valid_loss = avg_valid_loss
+        if valid_ppv_at_90_recall > best_ppv_at_90_recall:
+            best_ppv_at_90_recall = valid_ppv_at_90_recall
             save_path = os.path.join(args.save_dir, f"{args.experiment_id}_best.pt")
             torch.save(model.state_dict(), save_path)
             print(f"   -> Saved new best model to {save_path}")
