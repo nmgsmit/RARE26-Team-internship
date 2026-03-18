@@ -325,7 +325,13 @@ def main(args):
     model = build_model_compat(Model, args, n_classes).to(device)
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = AdamW(model.parameters(), lr=args.lr)
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    if len(trainable_params) == 0:
+        raise ValueError(
+            "Model has no trainable parameters. "
+            "Check model.py implementation and constructor arguments."
+        )
+    optimizer = AdamW(trainable_params, lr=args.lr)
 
     # TRAINING LOOP --------------------------------------------------------------------------------------------------------
     best_valid_loss = float('inf')
