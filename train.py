@@ -386,6 +386,13 @@ def main(args):
         valid_auroc, valid_auprc, valid_ppv_at_90_recall = compute_group_eval_metrics(valid_targets, valid_scores)
         test_targets, test_scores = collect_scores(model, testset_loader, device)
         test_auroc, test_auprc, test_ppv_at_90_recall = compute_group_eval_metrics(test_targets, test_scores)
+        test_predictions = (np.asarray(test_scores) >= 0.5).astype(int).tolist()
+        test_confusion_matrix = wandb.plot.confusion_matrix(
+            probs=None,
+            y_true=test_targets,
+            preds=test_predictions,
+            class_names=class_names,
+        )
 
         wandb.log({
             "epoch": epoch + 1,
@@ -394,20 +401,21 @@ def main(args):
             "train_accuracy": train_accuracy,
             "valid_loss": avg_valid_loss,
             "valid_accuracy": valid_accuracy,
-            "validation/epoch": epoch + 1,
-            "validation/learning_rate": optimizer.param_groups[0]["lr"],
-            "validation/train_loss": avg_train_loss,
-            "validation/valid_loss": avg_valid_loss,
-            "validation/AUPRC": valid_auprc,
-            "validation/AUROC": valid_auroc,
-            "validation/PPV@90RECALL": valid_ppv_at_90_recall,
-            "testset/epoch": epoch + 1,
-            "testset/learning_rate": optimizer.param_groups[0]["lr"],
-            "testset/train_loss": avg_train_loss,
-            "testset/valid_loss": avg_valid_loss,
-            "testset/AUPRC": test_auprc,
-            "testset/AUROC": test_auroc,
-            "testset/PPV@90RECALL": test_ppv_at_90_recall,
+            "epoch (validation)": epoch + 1,
+            "learning rate (validation)": optimizer.param_groups[0]["lr"],
+            "train loss (validation)": avg_train_loss,
+            "valid loss (validation)": avg_valid_loss,
+            "AUPRC (validation)": valid_auprc,
+            "AUROC (validation)": valid_auroc,
+            "PPV@90RECALL (validation)": valid_ppv_at_90_recall,
+            "epoch (test)": epoch + 1,
+            "learning rate (test)": optimizer.param_groups[0]["lr"],
+            "train loss (test)": avg_train_loss,
+            "valid loss (test)": avg_valid_loss,
+            "AUPRC (test)": test_auprc,
+            "AUROC (test)": test_auroc,
+            "PPV@90RECALL (test)": test_ppv_at_90_recall,
+            "confusion matrix (test)": test_confusion_matrix,
         })
 
         print(

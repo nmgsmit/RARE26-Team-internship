@@ -4,7 +4,7 @@ python3 train.py \
     --debug-center1-balanced \
     --debug-class-count 61 \
     --batch-size 64 \
-    --epochs 2 \
+    --epochs 20 \
     --lr 0.0001 \
     --num-workers 10 \
     --seed 42 \
