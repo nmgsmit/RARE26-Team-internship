@@ -104,7 +104,7 @@ def main(args):
             optimizer.step()
 
             train_loss += loss.item() * images.size(0)
-            train_loader, valid_loader, testset_loader, train_datasets, valid_datasets, testset_ds, testset_image_paths = prepare_datasets(args, device)
+            train_loader, valid_loader, train_ds, valid_ds, class_names = prepare_datasets(args, device)
             print(f"Using testset images from {args.testset_images_dir} ({len(testset_image_paths)} samples)")
 
 
