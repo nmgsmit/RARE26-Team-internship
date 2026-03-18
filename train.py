@@ -1,4 +1,5 @@
 import os
+import inspect
 import numpy as np
 import torch
 import torch.nn as nn
@@ -120,6 +121,42 @@ def collect_scores(model, loader, device):
             y_true.extend(labels.detach().cpu().tolist())
 
     return y_true, y_score
+
+
+def build_model_compat(Model, args, n_classes):
+    sig = inspect.signature(Model.__init__)
+    params = sig.parameters
+
+    init_kwargs = {}
+
+    if "in_channels" in params:
+        init_kwargs["in_channels"] = 3
+    elif "in_chans" in params:
+        init_kwargs["in_chans"] = 3
+
+    if "n_classes" in params:
+        init_kwargs["n_classes"] = n_classes
+    elif "num_classes" in params:
+        init_kwargs["num_classes"] = n_classes
+
+    if "backbone_name" in params:
+        init_kwargs["backbone_name"] = args.backbone_name
+    elif "backbone" in params:
+        init_kwargs["backbone"] = args.backbone_name
+
+    if "pretrained" in params:
+        init_kwargs["pretrained"] = args.pretrained
+    elif "use_pretrained" in params:
+        init_kwargs["use_pretrained"] = args.pretrained
+
+    try:
+        return Model(**init_kwargs)
+    except TypeError as exc:
+        raise TypeError(
+            "Failed to instantiate Model with compatible arguments. "
+            f"Detected constructor signature: {sig}. "
+            f"Tried kwargs: {sorted(init_kwargs.keys())}"
+        ) from exc
 
 def main(args):
     # Log into Weights & Biases so we can see the graphs later
@@ -285,12 +322,7 @@ def main(args):
     class_names = train_datasets[0].dataset.classes
     n_classes = len(class_names)
 
-    model = Model(
-        in_channels=3,
-        n_classes=n_classes,
-        backbone_name=args.backbone_name,
-        pretrained=args.pretrained,
-    ).to(device)
+    model = build_model_compat(Model, args, n_classes).to(device)
 
     criterion = nn.CrossEntropyLoss()
     optimizer = AdamW(model.parameters(), lr=args.lr)
