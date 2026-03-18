@@ -11,7 +11,7 @@ from PIL import Image
 from torchvision.datasets import ImageFolder
 from torchvision.transforms.v2 import Compose, Resize, ToImage, ToDtype, Normalize
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import average_precision_score, precision_recall_curve, roc_auc_score
+from sklearn.metrics import average_precision_score, precision_recall_curve, roc_auc_score, f1_score, recall_score, accuracy_score, confusion_matrix
 import wandb
  
 # Dataset structure:
@@ -71,6 +71,15 @@ def compute_group_eval_metrics(y_true, y_score, recall_target=0.90):
     auroc = roc_auc_score(y_true, y_score)
     auprc = average_precision_score(y_true, y_score)
 
+    # F1, Sensitivity, Specificity, Accuracy, Total Samples
+    y_pred = (y_score >= 0.5).astype(int)
+    f1 = f1_score(y_true, y_pred)
+    sensitivity = recall_score(y_true, y_pred)
+    accuracy = accuracy_score(y_true, y_pred)
+    cm = confusion_matrix(y_true, y_pred, labels=[0,1])
+    tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0,0,0,0)
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else float('nan')
+    total_samples = len(y_true)
 
     precision, recall, _ = precision_recall_curve(y_true, y_score)
     idx = np.where(recall >= recall_target)[0]
@@ -79,7 +88,7 @@ def compute_group_eval_metrics(y_true, y_score, recall_target=0.90):
     else:
         ppv_at_recall = float("nan")
 
-    return float(auroc), float(auprc), ppv_at_recall
+        return float(auroc), float(auprc), ppv_at_recall, f1, specificity, sensitivity, accuracy, total_samples
 
 
 def infer_testset_label_from_filename(image_path):
@@ -387,9 +396,9 @@ def main(args):
 # DONT CHANGE - W&B METRICS
         avg_valid_loss = valid_loss / valid_total
         valid_accuracy = valid_correct / valid_total
-        valid_auroc, valid_auprc, valid_ppv_at_90_recall = compute_group_eval_metrics(valid_targets, valid_scores)
+        valid_auroc, valid_auprc, valid_ppv_at_90_recall, valid_f1, valid_specificity, valid_sensitivity, valid_accuracy, valid_total = compute_group_eval_metrics(valid_targets, valid_scores)
         test_targets, test_scores = collect_scores(model, testset_loader, device)
-        test_auroc, test_auprc, test_ppv_at_90_recall = compute_group_eval_metrics(test_targets, test_scores)
+        test_auroc, test_auprc, test_ppv_at_90_recall, test_f1, test_specificity, test_sensitivity, test_accuracy, test_total = compute_group_eval_metrics(test_targets, test_scores)
         # test_predictions = (np.asarray(test_scores) >= 0.5).astype(int).tolist()
 
         wandb.log({
@@ -405,12 +414,22 @@ def main(args):
             "val/AUPRC": valid_auprc,
             "val/AUROC": valid_auroc,
             "val/PPV@90RECALL": valid_ppv_at_90_recall,
+            "val/F1": valid_f1,
+            "val/Specificity": valid_specificity,
+            "val/Sensitivity": valid_sensitivity,
+            "val/Accuracy": valid_accuracy,
+            "val/TotalSamples": valid_total,
             "test/epoch": epoch + 1,
             "test/train_loss": avg_train_loss,
             "test/valid_loss": avg_valid_loss,
             "test/AUPRC": test_auprc,
             "test/AUROC": test_auroc,
             "test/PPV@90RECALL": test_ppv_at_90_recall,
+            "test/F1": test_f1,
+            "test/Specificity": test_specificity,
+            "test/Sensitivity": test_sensitivity,
+            "test/Accuracy": test_accuracy,
+            "test/TotalSamples": test_total,
         })
 
         print(
