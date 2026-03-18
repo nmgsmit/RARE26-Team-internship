@@ -62,34 +62,36 @@ def get_args_parser():
 
 
 def compute_group_eval_metrics(y_true, y_score, recall_target=0.90):
-    y_true = np.asarray(y_true)
-    y_score = np.asarray(y_score)
     nan = float("nan")
-    # Always return 8 values for any edge case
-    if len(y_true) == 0 or len(y_score) == 0 or len(np.unique(y_true)) < 2:
-        return nan, nan, nan, nan, nan, nan, nan, nan
+    try:
+        y_true = np.asarray(y_true)
+        y_score = np.asarray(y_score)
+        if len(y_true) == 0 or len(y_score) == 0 or len(np.unique(y_true)) < 2:
+            return nan, nan, nan, nan, nan, nan, nan, nan
 
-    auroc = roc_auc_score(y_true, y_score)
-    auprc = average_precision_score(y_true, y_score)
+        auroc = roc_auc_score(y_true, y_score)
+        auprc = average_precision_score(y_true, y_score)
 
-    # F1, Sensitivity, Specificity, Accuracy, Total Samples
-    y_pred = (y_score >= 0.5).astype(int)
-    f1 = f1_score(y_true, y_pred)
-    sensitivity = recall_score(y_true, y_pred)
-    accuracy = accuracy_score(y_true, y_pred)
-    cm = confusion_matrix(y_true, y_pred, labels=[0,1])
-    tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0,0,0,0)
-    specificity = tn / (tn + fp) if (tn + fp) > 0 else float('nan')
-    total_samples = len(y_true)
+        # F1, Sensitivity, Specificity, Accuracy, Total Samples
+        y_pred = (y_score >= 0.5).astype(int)
+        f1 = f1_score(y_true, y_pred)
+        sensitivity = recall_score(y_true, y_pred)
+        accuracy = accuracy_score(y_true, y_pred)
+        cm = confusion_matrix(y_true, y_pred, labels=[0,1])
+        tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0,0,0,0)
+        specificity = tn / (tn + fp) if (tn + fp) > 0 else nan
+        total_samples = len(y_true)
 
-    precision, recall, _ = precision_recall_curve(y_true, y_score)
-    idx = np.where(recall >= recall_target)[0]
-    if len(idx) > 0:
-        ppv_at_recall = float(precision[idx[-1]])
-    else:
-        ppv_at_recall = float("nan")
+        precision, recall, _ = precision_recall_curve(y_true, y_score)
+        idx = np.where(recall >= recall_target)[0]
+        if len(idx) > 0:
+            ppv_at_recall = float(precision[idx[-1]])
+        else:
+            ppv_at_recall = nan
 
         return float(auroc), float(auprc), ppv_at_recall, f1, specificity, sensitivity, accuracy, total_samples
+    except Exception:
+        return nan, nan, nan, nan, nan, nan, nan, nan
 
 
 def infer_testset_label_from_filename(image_path):
