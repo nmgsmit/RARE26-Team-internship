@@ -1,6 +1,7 @@
 import numpy as np
 from sklearn.metrics import average_precision_score, precision_recall_curve, roc_auc_score, f1_score, recall_score, accuracy_score, confusion_matrix
 import wandb
+import torch
 
 def compute_group_eval_metrics(y_true, y_score, recall_target=0.90):
     nan = float("nan")

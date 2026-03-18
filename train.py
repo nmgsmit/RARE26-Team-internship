@@ -70,7 +70,7 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-    train_loader, valid_loader, train_datasets, valid_datasets = prepare_datasets(args, device)
+    train_loader, valid_loader, train_ds, valid_ds, class_names = prepare_datasets(args, device)
     testset_loader, testset_ds, testset_image_paths = load_external_testset(
         args.testset_images_dir, args.batch_size, args.num_workers, device
     )
@@ -79,16 +79,14 @@ def main(args):
     # MODEL SETUP ----------------------------------------------------------------------------------------------------------
     from model import Model
 
-    class_names = train_datasets[0].dataset.classes
     n_classes = len(class_names)
-
     model = Model(in_channels=3, n_classes=n_classes).to(device)
 
     criterion = nn.CrossEntropyLoss()
     optimizer = AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr)
 
     # TRAINING LOOP --------------------------------------------------------------------------------------------------------
-    best_valid_loss = float('inf')
+    best_valid_ppv_at_90_recall = float('-inf')
 
     for epoch in range(args.epochs):
         model.train()
@@ -151,11 +149,11 @@ def main(args):
             f"Test AUPRC: {test_auprc:.4f} | Test AUROC: {test_auroc:.4f} | Test PPV@90R: {test_ppv_at_90_recall:.4f}"
         )
 
-        if avg_valid_loss < best_valid_loss:
-            best_valid_loss = avg_valid_loss
+        if valid_ppv_at_90_recall > best_valid_ppv_at_90_recall:
+            best_valid_ppv_at_90_recall = valid_ppv_at_90_recall
             save_path = os.path.join(args.save_dir, f"{args.experiment_id}_best.pt")
             torch.save(model.state_dict(), save_path)
-            print(f"   -> Saved new best model to {save_path}")
+            print(f"   -> Saved new best model to {save_path} (PPV@90Recall: {valid_ppv_at_90_recall:.4f})")
 
     final_save_path = os.path.join(args.save_dir, f"{args.experiment_id}_final.pt")
     torch.save(model.state_dict(), final_save_path)
