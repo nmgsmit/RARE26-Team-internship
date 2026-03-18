@@ -1,7 +1,6 @@
 import os
 import inspect
 import numpy as np
-import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 from pathlib import Path
@@ -12,7 +11,7 @@ from PIL import Image
 from torchvision.datasets import ImageFolder
 from torchvision.transforms.v2 import Compose, Resize, ToImage, ToDtype, Normalize
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import average_precision_score, confusion_matrix, precision_recall_curve, roc_auc_score
+from sklearn.metrics import average_precision_score, precision_recall_curve, roc_auc_score
 import wandb
  
 # Dataset structure:
@@ -124,41 +123,6 @@ def collect_scores(model, loader, device):
     return y_true, y_score
 
 
-def build_confusion_matrix_image(y_true, y_pred, class_names, title):
-    labels = list(range(len(class_names)))
-    cm = confusion_matrix(y_true, y_pred, labels=labels)
-    total = np.sum(cm)
-
-    fig, ax = plt.subplots(figsize=(5.5, 4.5))
-    im = ax.imshow(cm, cmap="Blues")
-    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-
-    ax.set_xticks(labels)
-    ax.set_yticks(labels)
-    ax.set_xticklabels(class_names)
-    ax.set_yticklabels(class_names)
-    ax.set_xlabel("Predicted label")
-    ax.set_ylabel("True label")
-    ax.set_title(title)
-
-    threshold = cm.max() / 2 if cm.size else 0
-    for i in range(cm.shape[0]):
-        for j in range(cm.shape[1]):
-            count = cm[i, j]
-            pct = (count / total * 100.0) if total > 0 else 0.0
-            ax.text(
-                j,
-                i,
-                f"{count}\n({pct:.1f}%)",
-                ha="center",
-                va="center",
-                color="white" if count > threshold else "black",
-            )
-
-    fig.tight_layout()
-    image = wandb.Image(fig)
-    plt.close(fig)
-    return image
 
 
 def build_model_compat(Model, args, n_classes):
@@ -419,18 +383,13 @@ def main(args):
                 valid_scores.extend(probs.detach().cpu().tolist())
                 valid_targets.extend(labels.detach().cpu().tolist())
 
+# DONT CHANGE - W&B METRICS
         avg_valid_loss = valid_loss / valid_total
         valid_accuracy = valid_correct / valid_total
         valid_auroc, valid_auprc, valid_ppv_at_90_recall = compute_group_eval_metrics(valid_targets, valid_scores)
         test_targets, test_scores = collect_scores(model, testset_loader, device)
         test_auroc, test_auprc, test_ppv_at_90_recall = compute_group_eval_metrics(test_targets, test_scores)
-        test_predictions = (np.asarray(test_scores) >= 0.5).astype(int).tolist()
-        test_confusion_matrix = build_confusion_matrix_image(
-            y_true=test_targets,
-            y_pred=test_predictions,
-            class_names=class_names,
-            title="Confusion Matrix (test)",
-        )
+        # test_predictions = (np.asarray(test_scores) >= 0.5).astype(int).tolist()
 
         wandb.log({
             "epoch": epoch + 1,
@@ -453,7 +412,6 @@ def main(args):
             "test/AUPRC": test_auprc,
             "test/AUROC": test_auroc,
             "test/PPV@90RECALL": test_ppv_at_90_recall,
-            "test/confusion_matrix": test_confusion_matrix,
         })
 
         print(
