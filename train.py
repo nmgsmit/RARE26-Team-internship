@@ -71,10 +71,11 @@ def compute_group_eval_metrics(y_true, y_score, recall_target=0.90):
     auroc = roc_auc_score(y_true, y_score)
     auprc = average_precision_score(y_true, y_score)
 
+
     precision, recall, _ = precision_recall_curve(y_true, y_score)
-    valid_points = recall >= recall_target
-    if np.any(valid_points):
-        ppv_at_recall = float(np.max(precision[valid_points]))
+    idx = np.where(recall >= recall_target)[0]
+    if len(idx) > 0:
+        ppv_at_recall = float(precision[idx[-1]])
     else:
         ppv_at_recall = float("nan")
 
