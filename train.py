@@ -6,13 +6,22 @@ import torch.nn as nn
 from pathlib import Path
 from argparse import ArgumentParser
 from torch.optim import AdamW
+<<<<<<< Updated upstream
 from torch.utils.data import DataLoader, ConcatDataset, Dataset, Subset
 from PIL import Image
 from torchvision.datasets import ImageFolder
 from torchvision.transforms.v2 import Compose, Resize, ToImage, ToDtype, Normalize
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import average_precision_score, precision_recall_curve, roc_auc_score
+=======
+
+from sklearn.metrics import average_precision_score, precision_recall_curve, roc_auc_score, f1_score, recall_score, accuracy_score, confusion_matrix
+from metrics import compute_group_eval_metrics, collect_scores, log_metrics
+>>>>>>> Stashed changes
 import wandb
+
+from data import prepare_datasets
+from testdata import load_external_testset
  
 # Dataset structure:
 # data/
@@ -57,6 +66,7 @@ def get_args_parser():
         default=61,
         help="Number of samples per class used when --debug-center1-balanced is enabled",
     )
+<<<<<<< Updated upstream
     parser.set_defaults(pretrained=True)
     return parser
 
@@ -126,37 +136,16 @@ def collect_scores(model, loader, device):
 def build_model_compat(Model, args, n_classes):
     sig = inspect.signature(Model.__init__)
     params = sig.parameters
+=======
 
-    init_kwargs = {}
 
-    if "in_channels" in params:
-        init_kwargs["in_channels"] = 3
-    elif "in_chans" in params:
-        init_kwargs["in_chans"] = 3
 
-    if "n_classes" in params:
-        init_kwargs["n_classes"] = n_classes
-    elif "num_classes" in params:
-        init_kwargs["num_classes"] = n_classes
 
-    if "backbone_name" in params:
-        init_kwargs["backbone_name"] = args.backbone_name
-    elif "backbone" in params:
-        init_kwargs["backbone"] = args.backbone_name
+>>>>>>> Stashed changes
 
-    if "pretrained" in params:
-        init_kwargs["pretrained"] = args.pretrained
-    elif "use_pretrained" in params:
-        init_kwargs["use_pretrained"] = args.pretrained
 
-    try:
-        return Model(**init_kwargs)
-    except TypeError as exc:
-        raise TypeError(
-            "Failed to instantiate Model with compatible arguments. "
-            f"Detected constructor signature: {sig}. "
-            f"Tried kwargs: {sorted(init_kwargs.keys())}"
-        ) from exc
+
+
 
 def main(args):
     # Log into Weights & Biases so we can see the graphs later
@@ -168,153 +157,12 @@ def main(args):
     torch.backends.cudnn.deterministic = True 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # DATA ---------------------------------------------------------------------------------------------------------------
-    # In the coming part different steps of data loading and preparation are performed.
-    # -------------------------------------------------------------------------------------------------------- DATA LOADING 
-    # Check if the data is in a folder, if yes then this step will be skipped. Otherwise we download via huggingface.
-    # Do note that you need to fill in your personal huggingface token in the .env file for this to work.
 
-    if not os.path.exists(args.data_dir):
-        from huggingface_hub import snapshot_download 
-        
-        print("Data not found locally. Downloading folders from Hugging Face...")
-
-        hf_token = os.getenv("HF_TOKEN")
-
-        if not hf_token:
-            env_path = os.path.join(os.path.dirname(__file__), ".env")
-            if os.path.exists(env_path):
-                with open(env_path, "r", encoding="utf-8") as env_file:
-                    for line in env_file:
-                        stripped = line.strip()
-                        if stripped.startswith("HF_TOKEN="):
-                            hf_token = stripped.split("=", 1)[1].strip().strip('"').strip("'")
-                            break
-        
-        if not hf_token:
-            raise ValueError("Could not find HF_TOKEN in .env file! Make sure it is set.")
-
-        # Download the repo contents directly into your ./data folder!
-        snapshot_download(
-            repo_id="TimJaspersTue/RARE25-train", 
-            repo_type="dataset",
-            local_dir=args.data_dir, 
-            token=hf_token      
-        )
-        print("Data downloaded successfully.")
-    # ----------------------------------------------------------------------------------------------------- DATA PREPARATION 
-    # Standard: resize to 224x224 (quite standard), we can change it later!
-    transform = Compose([
-        ToImage(),
-        Resize((224, 224)), 
-        ToDtype(torch.float32, scale=True),
-        Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) # Normalization of the colour channels (standard)
-    ])
-
-    # <<!-- We can add more transformations here if you want to experiment with data augmentation. -->
-
-    # --------------------------------------------------------------------------------------------- COMBINE DATASETS AND SPLIT
-    # ImageFolder will automatically assign labels based on folder names (ndbe=0, neo=1).
-    discovered_centers = [
-        f for f in os.listdir(args.data_dir)
-        if f.startswith('center') and os.path.isdir(os.path.join(args.data_dir, f))
-    ]
-
-    if args.centers is not None:
-        unknown_centers = sorted(set(args.centers) - set(discovered_centers))
-        if unknown_centers:
-            raise ValueError(
-                f"Requested centers not found: {unknown_centers}. Available centers: {sorted(discovered_centers)}"
-            )
-        centers = args.centers
-    else:
-        centers = discovered_centers
-
-    if args.debug_center1_balanced:
-        if "center_1" not in discovered_centers:
-            raise ValueError(
-                f"debug mode requires center_1 in {args.data_dir}. Available centers: {sorted(discovered_centers)}"
-            )
-        centers = ["center_1"]
-
-    if len(centers) == 0:
-        raise ValueError(
-            f"No center folders found in {args.data_dir}. Expected folders like 'center_1', 'center_2'."
-        )
-
-    print(f"Using centers: {centers}")
-    train_datasets = []
-    valid_datasets = []
-    
-    for center in centers:
-        center_path = os.path.join(args.data_dir, center)
-        ds = ImageFolder(root=center_path, transform=transform)
-            
-        # SAFETY CHECK: Ensure labels are consistently 0=ndbe, 1=neo across all centers!
-        assert ds.class_to_idx == {'ndbe': 0, 'neo': 1}, f"CRITICAL WARNING: Class mapping in {center} is backwards or broken: {ds.class_to_idx}"
-
-        if args.debug_center1_balanced and center == "center_1":
-            ndbe_label = ds.class_to_idx["ndbe"]
-            neo_label = ds.class_to_idx["neo"]
-            ndbe_indices = [idx for idx, label in enumerate(ds.targets) if label == ndbe_label][:args.debug_class_count]
-            neo_indices = [idx for idx, label in enumerate(ds.targets) if label == neo_label][:args.debug_class_count]
-
-            if len(ndbe_indices) < args.debug_class_count or len(neo_indices) < args.debug_class_count:
-                raise ValueError(
-                    f"center_1 needs at least {args.debug_class_count} samples per class, found ndbe={len(ndbe_indices)} neo={len(neo_indices)}"
-                )
-
-            selected_indices = ndbe_indices + neo_indices
-            selected_targets = [ds.targets[idx] for idx in selected_indices]
-            print(
-                f"Debug subset active: center_1 with {len(ndbe_indices)} ndbe + {len(neo_indices)} neo "
-                f"= {len(selected_indices)} total samples"
-            )
-        else:
-            selected_indices = list(range(len(ds)))
-            selected_targets = ds.targets
-
-        # STRATIFIED SPLIT: Split this specific center while maintaining ndbe/neo ratios
-        # We split over selected_indices so debug mode can cap class counts first.
-        train_idx, val_idx = train_test_split(
-            selected_indices,
-            train_size=args.DatasetSplit / 100.0, 
-            stratify=selected_targets,
-            random_state=args.seed
-            )
-            
-        # Append the subsets to our lists
-        train_datasets.append(Subset(ds, train_idx))
-        valid_datasets.append(Subset(ds, val_idx))
-    
-    # Merge all the center subsets together
-    train_ds = ConcatDataset(train_datasets)
-    valid_ds = ConcatDataset(valid_datasets)
-
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
-    valid_loader = DataLoader(valid_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
-
-    # Build external testset loader once; metrics are recomputed on it every epoch.
-    testset_images_dir = Path(args.testset_images_dir)
-    if not testset_images_dir.exists():
-        raise FileNotFoundError(f"Testset images directory not found: {testset_images_dir}")
-
-    image_suffixes = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
-    testset_image_paths = sorted(
-        p for p in testset_images_dir.iterdir() if p.is_file() and p.suffix.lower() in image_suffixes
+    train_loader, valid_loader, train_datasets, valid_datasets = prepare_datasets(args, device)
+    testset_loader, testset_ds, testset_image_paths = load_external_testset(
+        args.testset_images_dir, args.batch_size, args.num_workers, device
     )
-    if len(testset_image_paths) == 0:
-        raise ValueError(f"No image files found in testset directory: {testset_images_dir}")
-
-    testset_ds = ExternalTestsetDataset(testset_image_paths, transform)
-    testset_loader = DataLoader(
-        testset_ds,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=(device.type == "cuda"),
-    )
-    print(f"Using testset images from {testset_images_dir} ({len(testset_image_paths)} samples)")
+    print(f"Using testset images from {args.testset_images_dir} ({len(testset_image_paths)} samples)")
     
     # MODEL SETUP ----------------------------------------------------------------------------------------------------------
     from model import Model
@@ -322,16 +170,10 @@ def main(args):
     class_names = train_datasets[0].dataset.classes
     n_classes = len(class_names)
 
-    model = build_model_compat(Model, args, n_classes).to(device)
+    model = Model(in_channels=3, n_classes=n_classes).to(device)
 
     criterion = nn.CrossEntropyLoss()
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
-    if len(trainable_params) == 0:
-        raise ValueError(
-            "Model has no trainable parameters. "
-            "Check model.py implementation and constructor arguments."
-        )
-    optimizer = AdamW(trainable_params, lr=args.lr)
+    optimizer = AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr)
 
     # TRAINING LOOP --------------------------------------------------------------------------------------------------------
     best_valid_loss = float('inf')
@@ -352,10 +194,10 @@ def main(args):
             optimizer.step()
 
             train_loss += loss.item() * images.size(0)
-            predictions = torch.argmax(outputs, dim=1)
-            train_correct += (predictions == labels).sum().item()
-            train_total += labels.size(0)
+            train_loader, valid_loader, testset_loader, train_datasets, valid_datasets, testset_ds, testset_image_paths = prepare_datasets(args, device)
+            print(f"Using testset images from {args.testset_images_dir} ({len(testset_image_paths)} samples)")
 
+<<<<<<< Updated upstream
         avg_train_loss = train_loss / train_total
         train_accuracy = train_correct / train_total
 
@@ -441,3 +283,5 @@ def main(args):
 
 if __name__ == "__main__":
     main(get_args_parser().parse_args())
+=======
+>>>>>>> Stashed changes
