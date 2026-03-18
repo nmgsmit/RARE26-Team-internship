@@ -8,4 +8,4 @@ python3 train.py \
     --lr 0.0001 \
     --num-workers 10 \
     --seed 42 \
-    --experiment-id "cnn-center1-training"
+    --experiment-id "metric_test"
