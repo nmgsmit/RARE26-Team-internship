@@ -64,9 +64,9 @@ def get_args_parser():
 def compute_group_eval_metrics(y_true, y_score, recall_target=0.90):
     y_true = np.asarray(y_true)
     y_score = np.asarray(y_score)
-
-    if len(np.unique(y_true)) < 2:
-        nan = float("nan")
+    nan = float("nan")
+    # Always return 8 values for any edge case
+    if len(y_true) == 0 or len(y_score) == 0 or len(np.unique(y_true)) < 2:
         return nan, nan, nan, nan, nan, nan, nan, nan
 
     auroc = roc_auc_score(y_true, y_score)
