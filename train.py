@@ -66,7 +66,8 @@ def compute_group_eval_metrics(y_true, y_score, recall_target=0.90):
     y_score = np.asarray(y_score)
 
     if len(np.unique(y_true)) < 2:
-        return float("nan"), float("nan"), float("nan")
+        nan = float("nan")
+        return nan, nan, nan, nan, nan, nan, nan, nan
 
     auroc = roc_auc_score(y_true, y_score)
     auprc = average_precision_score(y_true, y_score)
