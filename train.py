@@ -7,12 +7,18 @@ from pathlib import Path
 from argparse import ArgumentParser
 from torch.optim import AdamW
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 from torch.utils.data import DataLoader, ConcatDataset, Dataset, Subset
 from PIL import Image
 from torchvision.datasets import ImageFolder
 from torchvision.transforms.v2 import Compose, Resize, ToImage, ToDtype, Normalize
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import average_precision_score, precision_recall_curve, roc_auc_score
+=======
+
+from sklearn.metrics import average_precision_score, precision_recall_curve, roc_auc_score, f1_score, recall_score, accuracy_score, confusion_matrix
+from metrics import compute_group_eval_metrics, collect_scores, log_metrics
+>>>>>>> Stashed changes
 =======
 
 from sklearn.metrics import average_precision_score, precision_recall_curve, roc_auc_score, f1_score, recall_score, accuracy_score, confusion_matrix
@@ -66,6 +72,7 @@ def get_args_parser():
         default=61,
         help="Number of samples per class used when --debug-center1-balanced is enabled",
     )
+<<<<<<< Updated upstream
 <<<<<<< Updated upstream
     parser.set_defaults(pretrained=True)
     return parser
@@ -137,6 +144,7 @@ def build_model_compat(Model, args, n_classes):
     sig = inspect.signature(Model.__init__)
     params = sig.parameters
 =======
+=======
 
 
 
@@ -146,6 +154,14 @@ def build_model_compat(Model, args, n_classes):
 
 
 
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+
+
+
+
+=======
+>>>>>>> Stashed changes
 
 def main(args):
     # Log into Weights & Biases so we can see the graphs later
@@ -197,6 +213,7 @@ def main(args):
             train_loader, valid_loader, testset_loader, train_datasets, valid_datasets, testset_ds, testset_image_paths = prepare_datasets(args, device)
             print(f"Using testset images from {args.testset_images_dir} ({len(testset_image_paths)} samples)")
 
+<<<<<<< Updated upstream
 <<<<<<< Updated upstream
         avg_train_loss = train_loss / train_total
         train_accuracy = train_correct / train_total
@@ -283,5 +300,7 @@ def main(args):
 
 if __name__ == "__main__":
     main(get_args_parser().parse_args())
+=======
+>>>>>>> Stashed changes
 =======
 >>>>>>> Stashed changes
