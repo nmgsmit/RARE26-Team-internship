@@ -1,12 +1,9 @@
 import os
-import inspect
-import numpy as np
 import torch
 import torch.nn as nn
-from pathlib import Path
 from argparse import ArgumentParser
 from torch.optim import AdamW
-from metrics import compute_group_eval_metrics, collect_scores, log_metrics
+from metrics import compute_group_eval_metrics, collect_scores
 from data import prepare_datasets
 from testdata import load_external_testset
 import wandb
@@ -23,9 +20,7 @@ import wandb
 
 def get_args_parser():
     parser = ArgumentParser("RARE25 Classification Training")
-    # Change the default path to match your folder name!
     parser.add_argument("--data-dir", type=str, default="./data", help="Where you put center_1, center_2, etc.")
-    parser.add_argument("--DatasetSplit", type=int, default=80, help="Percentage of images for training (rest for validation)")
     parser.add_argument("--batch-size", type=int, default=32, help="How many images to look at once")
     parser.add_argument("--epochs", type=int, default=20, help="How many times to loop over the whole dataset")
     parser.add_argument("--lr", type=float, default=1e-4, help="How fast the model 'learns'")
@@ -33,7 +28,6 @@ def get_args_parser():
     parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducibility")
     parser.add_argument("--experiment-id", type=str, default="rare25-test-run")
     parser.add_argument("--save-dir", type=str, default="./checkpoints", help="Where to save the trained model")
-    parser.add_argument("--centers", nargs="+", default=None, help="Optional list of centers to use, e.g. --centers center_1")
     parser.add_argument("--backbone-name", type=str, default="vit_base_patch16_dinov3", help="timm DinoV3 backbone name")
     parser.add_argument("--pretrained", action="store_true", help="Use pretrained DinoV3 weights")
     parser.add_argument("--no-pretrained", action="store_false", dest="pretrained", help="Disable pretrained DinoV3 weights")
@@ -42,17 +36,6 @@ def get_args_parser():
         type=str,
         default="./data/EVC_Barretts_FullSet/images",
         help="Path to external testset images used for per-epoch testset metrics",
-    )
-    parser.add_argument(
-        "--debug-center1-balanced",
-        action="store_true",
-        help="Use only center_1 and cap both classes to --debug-class-count samples for quick sanity checks",
-    )
-    parser.add_argument(
-        "--debug-class-count",
-        type=int,
-        default=61,
-        help="Number of samples per class used when --debug-center1-balanced is enabled",
     )
 
     parser.set_defaults(pretrained=True)
@@ -70,8 +53,8 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-    train_loader, valid_loader, train_ds, valid_ds, class_names = prepare_datasets(args, device)
-    testset_loader, testset_ds, testset_image_paths = load_external_testset(
+    train_loader, valid_loader, _, _, class_names = prepare_datasets(args, device)
+    testset_loader, _, testset_image_paths = load_external_testset(
         args.testset_images_dir, args.batch_size, args.num_workers, device
     )
     print(f"Using testset images from {args.testset_images_dir} ({len(testset_image_paths)} samples)")
@@ -80,7 +63,12 @@ def main(args):
     from model import Model
 
     n_classes = len(class_names)
-    model = Model(in_channels=3, n_classes=n_classes).to(device)
+    model = Model(
+        in_channels=3,
+        n_classes=n_classes,
+        backbone_name=args.backbone_name,
+        pretrained=args.pretrained,
+    ).to(device)
 
     criterion = nn.CrossEntropyLoss()
     optimizer = AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr)
@@ -104,10 +92,15 @@ def main(args):
             optimizer.step()
 
             train_loss += loss.item() * images.size(0)
-            train_loader, valid_loader, train_ds, valid_ds, class_names = prepare_datasets(args, device)
-            print(f"Using testset images from {args.testset_images_dir} ({len(testset_image_paths)} samples)")
+            predictions = torch.argmax(outputs, dim=1)
+            train_correct += (predictions == labels).sum().item()
+            train_total += labels.size(0)
 
 
+        if train_total == 0:
+            raise ValueError(
+                "Training loader produced zero samples. Check the dataset split, filters, and batch configuration."
+            )
         avg_train_loss = train_loss / train_total
         train_accuracy = train_correct / train_total
 
@@ -133,12 +126,33 @@ def main(args):
                 valid_scores.extend(probs.detach().cpu().tolist())
                 valid_targets.extend(labels.detach().cpu().tolist())
 
+        if valid_total == 0:
+            raise ValueError(
+                "Validation loader produced zero samples. Check the dataset split, filters, and batch configuration."
+            )
         avg_valid_loss = valid_loss / valid_total
         valid_accuracy = valid_correct / valid_total
-        valid_auroc, valid_auprc, valid_ppv_at_90_recall = compute_group_eval_metrics(valid_targets, valid_scores)
+        (
+            valid_auroc,
+            valid_auprc,
+            valid_ppv_at_90_recall,
+            valid_f1,
+            valid_specificity,
+            valid_sensitivity,
+            _valid_metric_accuracy,
+            _valid_metric_total,
+        ) = compute_group_eval_metrics(valid_targets, valid_scores)
         test_targets, test_scores = collect_scores(model, testset_loader, device)
-        test_auroc, test_auprc, test_ppv_at_90_recall = compute_group_eval_metrics(test_targets, test_scores)
-        test_predictions = (np.asarray(test_scores) >= 0.5).astype(int).tolist()
+        (
+            test_auroc,
+            test_auprc,
+            test_ppv_at_90_recall,
+            test_f1,
+            test_specificity,
+            test_sensitivity,
+            test_accuracy,
+            test_total,
+        ) = compute_group_eval_metrics(test_targets, test_scores)
 
     
         print(
