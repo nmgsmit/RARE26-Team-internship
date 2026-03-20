@@ -1,11 +1,10 @@
 python3 train.py \
     --data-dir ./data/Challenge_train_data \
-    --centers center_1 \
-    --debug-center1-balanced \
-    --debug-class-count 61 \
     --batch-size 64 \
     --epochs 20 \
     --lr 0.0001 \
     --num-workers 10 \
     --seed 42 \
-    --experiment-id "DINOv3 Linear head"
+    --experiment-id "struct_test" \
+    --backbone-name vit_base_patch16_dinov3 \
+    --no-pretrained
