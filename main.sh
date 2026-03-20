@@ -5,5 +5,5 @@ python3 train.py \
     --lr 0.0001 \
     --num-workers 10 \
     --seed 42 \
-    --experiment-id "struct_test" \
+    --experiment-id "Dinov3_Focal_wrs_baseline_(Linear_head)" \
     --backbone-name vit_base_patch16_dinov3.lvd1689m
