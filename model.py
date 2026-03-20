@@ -4,24 +4,17 @@ import timm
 
 
 class Model(nn.Module):
-    """Image classifier wrapper around a timm backbone."""
-
-    def __init__(
-        self,
-        in_channels=3,
-        n_classes=2,
-        backbone_name="vit_base_patch16_dinov3",
-        pretrained=True,
-    ):
+    def __init__(self, in_channels=3, n_classes=2, image_size=224, hidden_dim=32, **kwargs):
         super().__init__()
-
-        self.backbone = timm.create_model(
-            backbone_name,
-            pretrained=pretrained,
-            in_chans=in_channels,
-            num_classes=n_classes,
+        input_dim = in_channels * image_size * image_size
+        self.net = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, 1),
         )
 
     def forward(self, x):
-        return self.backbone(x)
+        pos_logit = self.net(x)
+        return torch.cat([-pos_logit, pos_logit], dim=1)
 
