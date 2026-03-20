@@ -1,9 +1,6 @@
 import os
-import inspect
-import numpy as np
 import torch
 import torch.nn as nn
-from pathlib import Path
 from argparse import ArgumentParser
 from torch.optim import AdamW
 from metrics import compute_group_eval_metrics, collect_scores, log_metrics
@@ -31,17 +28,13 @@ def get_args_parser():
     parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducibility")
     parser.add_argument("--experiment-id", type=str, default="rare25-test-run")
     parser.add_argument("--save-dir", type=str, default="./checkpoints", help="Where to save the trained model")
-    parser.add_argument("--backbone-name", type=str, default="vit_base_patch16_dinov3", help="timm DinoV3 backbone name")
-    parser.add_argument("--pretrained", action="store_true", help="Use pretrained DinoV3 weights")
-    parser.add_argument("--no-pretrained", action="store_false", dest="pretrained", help="Disable pretrained DinoV3 weights")
+    parser.add_argument("--backbone-name", type=str, default="vit_base_patch16_dinov3.lvd1689m", help="timm DinoV3 backbone name")
     parser.add_argument(
         "--testset-images-dir",
         type=str,
         default="./data/EVC_Barretts_FullSet/images",
         help="Path to external testset images used for per-epoch testset metrics",
     )
-
-    parser.set_defaults(pretrained=True)
     return parser
 
 
@@ -56,7 +49,7 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-    train_loader, valid_loader, _, _, class_names = prepare_datasets(args, device)
+    train_loader, valid_loader, train_ds, _, class_names = prepare_datasets(args, device)
     testset_loader, _, testset_image_paths = load_external_testset(
         args.testset_images_dir, args.batch_size, args.num_workers, device
     )
@@ -70,10 +63,17 @@ def main(args):
         in_channels=3,
         n_classes=n_classes,
         backbone_name=args.backbone_name,
-        pretrained=args.pretrained,
     ).to(device)
 
-    criterion = nn.CrossEntropyLoss()
+    train_labels = torch.tensor(train_ds.df["label"].tolist(), dtype=torch.long)
+    class_counts = torch.bincount(train_labels, minlength=n_classes).float()
+    if torch.any(class_counts == 0):
+        raise ValueError(f"At least one class has zero training samples: {class_counts.tolist()}")
+    class_weights = class_counts.sum() / (n_classes * class_counts)
+    class_weights = class_weights.to(device)
+    print(f"Using class-weighted cross entropy with weights: {class_weights.tolist()}")
+
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr)
 
     # TRAINING LOOP --------------------------------------------------------------------------------------------------------

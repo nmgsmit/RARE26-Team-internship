@@ -6,5 +6,4 @@ python3 train.py \
     --num-workers 10 \
     --seed 42 \
     --experiment-id "struct_test" \
-    --backbone-name vit_base_patch16_dinov3 \
-    --no-pretrained
+    --backbone-name vit_base_patch16_dinov3.lvd1689m

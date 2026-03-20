@@ -30,5 +30,20 @@ else
     source venv/bin/activate
 fi
 
+# Cache Hugging Face downloads outside the repo and reuse them across jobs.
+export HF_HOME="${HF_HOME:-/scratch-shared/${USER}/hf_cache}"
+export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
+mkdir -p "${HF_HOME}" "${HF_HUB_CACHE}"
+
+# Download the pretrained DINOv3 backbone once if it is not cached yet.
+python - <<'PY'
+import timm
+
+model_name = "vit_base_patch16_dinov3.lvd1689m"
+print(f"Ensuring pretrained weights for {model_name} are cached in the Hugging Face cache...")
+timm.create_model(model_name, pretrained=True, num_classes=0)
+print("Pretrained weights ready.")
+PY
+
 # Run training
 /bin/bash main.sh
