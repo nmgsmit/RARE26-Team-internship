@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 from argparse import ArgumentParser
 from torch.optim import AdamW
-from metrics import compute_group_eval_metrics, collect_scores
+from metrics import compute_group_eval_metrics, collect_scores, log_metrics
 from data import prepare_datasets
 from testdata import load_external_testset
 import wandb
@@ -161,6 +161,29 @@ def main(args):
             f"Val Loss: {avg_valid_loss:.4f} | Val Acc: {valid_accuracy:.4f} | "
             f"Val AUPRC: {valid_auprc:.4f} | Val AUROC: {valid_auroc:.4f} | Val PPV@90R: {valid_ppv_at_90_recall:.4f} | "
             f"Test AUPRC: {test_auprc:.4f} | Test AUROC: {test_auroc:.4f} | Test PPV@90R: {test_ppv_at_90_recall:.4f}"
+        )
+        log_metrics(
+            epoch,
+            optimizer,
+            avg_train_loss,
+            train_accuracy,
+            avg_valid_loss,
+            valid_accuracy,
+            valid_auprc,
+            valid_auroc,
+            valid_ppv_at_90_recall,
+            valid_f1,
+            valid_specificity,
+            valid_sensitivity,
+            valid_total,
+            test_auprc,
+            test_auroc,
+            test_ppv_at_90_recall,
+            test_f1,
+            test_specificity,
+            test_sensitivity,
+            test_accuracy,
+            test_total,
         )
 
         if valid_ppv_at_90_recall > best_valid_ppv_at_90_recall:
