@@ -18,19 +18,6 @@ import wandb
 #     └── neo/ 
 ### 
 
-class FocalLoss(nn.Module):
-    def __init__(self, alpha=None, gamma=2.0):
-        super().__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-
-    def forward(self, inputs, targets):
-        ce_loss = nn.functional.cross_entropy(inputs, targets, weight=self.alpha, reduction="none")
-        pt = torch.exp(-ce_loss)
-        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
-        return focal_loss.mean()
-
-
 def get_args_parser():
     parser = ArgumentParser("RARE25 Classification Training")
     parser.add_argument("--data-dir", type=str, default="./data", help="Where you put center_1, center_2, etc.")
@@ -52,10 +39,6 @@ def get_args_parser():
 
 
 def main(args):
-    experiment_suffix = "focal_wrs"
-    if experiment_suffix not in args.experiment_id:
-        args.experiment_id = f"{args.experiment_id}_{experiment_suffix}"
-
     # Log into Weights & Biases so we can see the graphs later
     wandb.init(project="RARE25-Project", name=args.experiment_id, config=vars(args))
     
@@ -88,9 +71,9 @@ def main(args):
         raise ValueError(f"At least one class has zero training samples: {class_counts.tolist()}")
     class_weights = class_counts.sum() / (n_classes * class_counts)
     class_weights = class_weights.to(device)
-    print(f"Using focal loss with class weights: {class_weights.tolist()}")
+    print(f"Using balanced cross entropy with class weights: {class_weights.tolist()}")
 
-    criterion = FocalLoss(alpha=class_weights)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr)
 
     # TRAINING LOOP --------------------------------------------------------------------------------------------------------

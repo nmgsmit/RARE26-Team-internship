@@ -3,7 +3,7 @@ import pandas as pd
 import torch
 from PIL import Image
 from sklearn.model_selection import train_test_split
-from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from torch.utils.data import DataLoader, Dataset
 from torchvision.datasets import ImageFolder
 from torchvision.transforms.v2 import Compose, Resize, ToImage, ToDtype, Normalize
 
@@ -110,16 +110,8 @@ def prepare_datasets(args, device):
     train_ds = SimpleDataset(train_df, transform)
     valid_ds = SimpleDataset(val_df, transform)
 
-    class_counts = train_df["label"].value_counts().sort_index()
-    sample_weights = train_df["label"].map(lambda label: 1.0 / class_counts[label]).to_numpy()
-    train_sampler = WeightedRandomSampler(
-        weights=torch.as_tensor(sample_weights, dtype=torch.double),
-        num_samples=len(sample_weights),
-        replacement=True,
-    )
-    
     train_loader = DataLoader(
-        train_ds, batch_size=args.batch_size, sampler=train_sampler, num_workers=args.num_workers
+        train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers
     )
     valid_loader = DataLoader(
         valid_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers
