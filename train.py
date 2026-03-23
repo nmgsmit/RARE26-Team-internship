@@ -28,7 +28,19 @@ def get_args_parser():
     parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducibility")
     parser.add_argument("--experiment-id", type=str, default="rare25-test-run")
     parser.add_argument("--save-dir", type=str, default="./checkpoints", help="Where to save the trained model")
-    parser.add_argument("--backbone-name", type=str, default="vit_base_patch16_dinov3.lvd1689m", help="timm DinoV3 backbone name")
+    parser.add_argument("--backbone-name", type=str, default="vit_base_patch16_dinov3.lvd1689m", help="timm backbone name")
+    parser.add_argument(
+        "--backbone-weights-path",
+        type=str,
+        default=None,
+        help="Optional local checkpoint used to initialize the backbone instead of timm pretrained weights.",
+    )
+    parser.add_argument(
+        "--input-size",
+        type=int,
+        default=224,
+        help="Square resize used for both train/validation images and the external testset.",
+    )
     parser.add_argument(
         "--testset-images-dir",
         type=str,
@@ -51,7 +63,7 @@ def main(args):
 
     train_loader, valid_loader, train_ds, _, class_names = prepare_datasets(args, device)
     testset_loader, _, testset_image_paths = load_external_testset(
-        args.testset_images_dir, args.batch_size, args.num_workers, device
+        args.testset_images_dir, args.batch_size, args.num_workers, device, args.input_size
     )
     print(f"Using testset images from {args.testset_images_dir} ({len(testset_image_paths)} samples)")
     
@@ -63,7 +75,11 @@ def main(args):
         in_channels=3,
         n_classes=n_classes,
         backbone_name=args.backbone_name,
+        backbone_weights_path=args.backbone_weights_path,
+        input_size=args.input_size,
     ).to(device)
+    if args.backbone_weights_path:
+        print(f"Loaded backbone weights from {args.backbone_weights_path}")
 
     train_labels = torch.tensor(train_ds.df["label"].tolist(), dtype=torch.long)
     class_counts = torch.bincount(train_labels, minlength=n_classes).float()

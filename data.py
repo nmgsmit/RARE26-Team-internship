@@ -34,7 +34,7 @@ def prepare_datasets(args, device):
     # Compose transforms
     transform = Compose([
         ToImage(),
-        Resize((224, 224)),
+        Resize((args.input_size, args.input_size)),
         ToDtype(torch.float32, scale=True),
         Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])

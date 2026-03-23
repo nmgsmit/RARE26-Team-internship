@@ -29,10 +29,10 @@ def infer_testset_label_from_filename(image_path):
         "Expected suffix _ACHD or _NDBT before extension."
     )
 
-def load_external_testset(testset_images_dir, batch_size, num_workers, device):
+def load_external_testset(testset_images_dir, batch_size, num_workers, device, input_size=224):
     transform = Compose([
         ToImage(),
-        Resize((224, 224)),
+        Resize((input_size, input_size)),
         ToDtype(torch.float32, scale=True),
         Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])

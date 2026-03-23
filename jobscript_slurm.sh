@@ -35,15 +35,21 @@ export HF_HOME="${HF_HOME:-/scratch-shared/${USER}/hf_cache}"
 export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
 mkdir -p "${HF_HOME}" "${HF_HUB_CACHE}"
 
-# Download the pretrained DINOv3 backbone once if it is not cached yet.
+TRAIN_SCRIPT="${TRAIN_SCRIPT:-main.sh}"
+TIMM_PRELOAD_MODEL="${TIMM_PRELOAD_MODEL:-vit_base_patch16_dinov3.lvd1689m}"
+
+# Download timm pretrained weights ahead of time when the selected run needs them.
+if [ -n "${TIMM_PRELOAD_MODEL}" ]; then
 python - <<'PY'
+import os
 import timm
 
-model_name = "vit_base_patch16_dinov3.lvd1689m"
+model_name = os.environ["TIMM_PRELOAD_MODEL"]
 print(f"Ensuring pretrained weights for {model_name} are cached in the Hugging Face cache...")
 timm.create_model(model_name, pretrained=True, num_classes=0)
 print("Pretrained weights ready.")
 PY
+fi
 
 # Run training
-/bin/bash main.sh
+/bin/bash "${TRAIN_SCRIPT}"
