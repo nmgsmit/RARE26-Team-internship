@@ -7,7 +7,7 @@ python3 train.py \
     --lr 0.0001 \
     --num-workers 10 \
     --seed 42 \
-    --experiment-id "Gastronet_DINOv2_linear_probe_224" \
+    --experiment-id "Gastronet_DINOv2_linear_probe_336" \
     --backbone-name vit_base_patch14_reg4_dinov2 \
     --backbone-weights-path "${GASTRONET_CKPT}" \
-    --input-size 224
+    --input-size 336
