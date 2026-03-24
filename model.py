@@ -103,12 +103,16 @@ class Model(nn.Module):
         backbone_weights_path=None,
         input_size=224,
         freeze_backbone=True,
+        pretrained=None,
         **kwargs,
     ):
         super().__init__()
+        if pretrained is None:
+            pretrained = backbone_weights_path is None
+
         self.backbone = timm.create_model(
             backbone_name,
-            pretrained=backbone_weights_path is None,
+            pretrained=pretrained,
             num_classes=0,
             in_chans=in_channels,
             img_size=input_size,

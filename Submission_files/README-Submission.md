@@ -16,12 +16,14 @@ Your container runs `predict.py` as entrypoint (see [Submission_files/Dockerfile
 
 Inside the container, paths are fixed:
 
-- Input images: `IMAGE_DIR = "/data"`
+- Input images: `IMAGE_DIR = "/data/test"`
 - Output predictions: `OUTPUT_DIR = "/output"`
 - Model weights: `MODEL_PATH = "/app/model.pt"`
 
 `predict.py` loads `Model` with strict weights loading.
 So your `/app/model.pt` must match the architecture in [model.py](model.py).
+For this branch, that means the Gastronet setup from [main_gastronet.sh](main_gastronet.sh):
+`vit_base_patch14_reg4_dinov2` with `input_size=336`.
 
 ---
 
@@ -32,18 +34,18 @@ Training saves checkpoints from [train.py](train.py), typically under:
 
 Pick your best checkpoint and copy/rename it to:
 
-- `Submission_files/model.pt`
+- `model.pt` in the repo root
 
 Example from repo root:
 
 ```bash
-cp "checkpoints/<experiment-id>.pt" "Submission_files/model.pt"
+cp "checkpoints/<experiment-id>.pt" "model.pt"
 ```
 
 On Windows PowerShell:
 
 ```powershell
-Copy-Item "checkpoints\<experiment-id>.pt" "Submission_files\model.pt"
+Copy-Item "checkpoints\<experiment-id>.pt" "model.pt"
 ```
 
 ---
@@ -53,12 +55,12 @@ Copy-Item "checkpoints\<experiment-id>.pt" "Submission_files\model.pt"
 From repo root:
 
 ```bash
-docker build -t team-internship:latest -f Submission_files/Dockerfile Submission_files
+docker build -t team-internship:latest -f Submission_files/Dockerfile .
 ```
 
 This creates a self-contained image with:
 - `predict.py`
-- `model.py` (copied by Dockerfile from the build context setup you use)
+- `model.py`
 - `model.pt`
 
 ---
@@ -82,7 +84,7 @@ docker run --rm -v "${PWD}\data\EVC_Barretts_FullSet\images:/data/test" -v "${PW
 ```
 
 Expected behavior:
-- It reads all `*.png` from `/data`
+- It reads test images from `/data/test`
 - It writes predictions to `/output`
 
 ---
@@ -106,7 +108,7 @@ To be added.
 
 ## 7. Common failure checks
 
-- `model.pt` missing from `Submission_files/` before build.
+- `model.pt` missing from the repo root before build.
 - `model.pt` incompatible with `Model` in [model.py](model.py).
 - Input/output paths changed from `/data` and `/output`.
 - Built from wrong Docker context.
