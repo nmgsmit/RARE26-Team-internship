@@ -1,9 +1,15 @@
 import os
+import numpy as np
 import torch
 import torch.nn as nn
 from argparse import ArgumentParser
 from torch.optim import AdamW
-from metrics import compute_group_eval_metrics, collect_scores, log_metrics
+from metrics import (
+    compute_group_eval_metrics,
+    collect_scores,
+    log_metrics,
+    project_operating_metrics_to_prevalence,
+)
 from data import prepare_datasets
 from testdata import load_external_testset
 import wandb
@@ -91,9 +97,11 @@ def main(args):
 
     criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr)
+    projected_prevalence = 0.01
 
     # TRAINING LOOP --------------------------------------------------------------------------------------------------------
-    best_valid_ppv_at_90_recall = float('-inf')
+    best_valid_projected_ppv = float("-inf")
+    best_valid_fpr = float("inf")
 
     for epoch in range(args.epochs):
         model.train()
@@ -151,35 +159,34 @@ def main(args):
             )
         avg_valid_loss = valid_loss / valid_total
         valid_accuracy = valid_correct / valid_total
-        (
-            valid_auroc,
-            valid_auprc,
-            valid_ppv_at_90_recall,
-            valid_f1,
-            valid_specificity,
-            valid_sensitivity,
-            _valid_metric_accuracy,
-            _valid_metric_total,
-        ) = compute_group_eval_metrics(valid_targets, valid_scores)
+        valid_metrics = compute_group_eval_metrics(valid_targets, valid_scores)
+        valid_threshold = valid_metrics["Threshold"]
+        valid_projected_metrics = project_operating_metrics_to_prevalence(
+            valid_metrics,
+            prevalence=projected_prevalence,
+        )
         test_targets, test_scores = collect_scores(model, testset_loader, device)
-        (
-            test_auroc,
-            test_auprc,
-            test_ppv_at_90_recall,
-            test_f1,
-            test_specificity,
-            test_sensitivity,
-            test_accuracy,
-            test_total,
-        ) = compute_group_eval_metrics(test_targets, test_scores)
+        test_metrics = compute_group_eval_metrics(test_targets, test_scores, threshold=valid_threshold)
+        test_projected_metrics = project_operating_metrics_to_prevalence(
+            test_metrics,
+            prevalence=projected_prevalence,
+        )
 
     
         print(
             f"Epoch {epoch + 1:02d}/{args.epochs} | "
             f"Train Loss: {avg_train_loss:.4f} | Train Acc: {train_accuracy:.4f} | "
             f"Val Loss: {avg_valid_loss:.4f} | Val Acc: {valid_accuracy:.4f} | "
-            f"Val AUPRC: {valid_auprc:.4f} | Val AUROC: {valid_auroc:.4f} | Val PPV@90R: {valid_ppv_at_90_recall:.4f} | "
-            f"Test AUPRC: {test_auprc:.4f} | Test AUROC: {test_auroc:.4f} | Test PPV@90R: {test_ppv_at_90_recall:.4f}"
+            f"Val AUPRC: {valid_metrics['AUPRC']:.4f} | Val AUROC: {valid_metrics['AUROC']:.4f} | "
+            f"Val PPV@90R: {valid_metrics['PPV@90RECALL']:.4f} | Val Thr: {valid_threshold:.4f} | "
+            f"Val TPR: {valid_metrics['TPR']:.4f} | Val FPR: {valid_metrics['FPR']:.4f} | Val PPV: {valid_metrics['PPV']:.4f} | "
+            f"1%Val PPV: {valid_projected_metrics['Projected PPV']:.4f} | "
+            f"1%Val FP/1000: {valid_projected_metrics['Projected FP per 1000']:.2f} | "
+            f"Test AUPRC: {test_metrics['AUPRC']:.4f} | Test AUROC: {test_metrics['AUROC']:.4f} | "
+            f"Test Thr: {test_metrics['Threshold']:.4f} | Test TPR: {test_metrics['TPR']:.4f} | "
+            f"Test FPR: {test_metrics['FPR']:.4f} | Test PPV: {test_metrics['PPV']:.4f} | "
+            f"1%Test PPV: {test_projected_metrics['Projected PPV']:.4f} | "
+            f"1%Test FP/1000: {test_projected_metrics['Projected FP per 1000']:.2f}"
         )
         log_metrics(
             epoch,
@@ -188,28 +195,49 @@ def main(args):
             train_accuracy,
             avg_valid_loss,
             valid_accuracy,
-            valid_auprc,
-            valid_auroc,
-            valid_ppv_at_90_recall,
-            valid_f1,
-            valid_specificity,
-            valid_sensitivity,
-            valid_total,
-            test_auprc,
-            test_auroc,
-            test_ppv_at_90_recall,
-            test_f1,
-            test_specificity,
-            test_sensitivity,
-            test_accuracy,
-            test_total,
+            valid_metrics,
+            test_metrics,
+            valid_projected_metrics,
+            test_projected_metrics,
         )
 
-        if valid_ppv_at_90_recall > best_valid_ppv_at_90_recall:
-            best_valid_ppv_at_90_recall = valid_ppv_at_90_recall
+        current_valid_projected_ppv = (
+            valid_projected_metrics["Projected PPV"]
+            if np.isfinite(valid_projected_metrics["Projected PPV"])
+            else float("-inf")
+        )
+        current_valid_fpr = (
+            valid_projected_metrics["FPR"]
+            if np.isfinite(valid_projected_metrics["FPR"])
+            else float("inf")
+        )
+        same_projected_ppv = (
+            (
+                not np.isfinite(current_valid_projected_ppv)
+                and not np.isfinite(best_valid_projected_ppv)
+                and current_valid_projected_ppv == best_valid_projected_ppv
+            )
+            or (
+                np.isfinite(current_valid_projected_ppv)
+                and np.isfinite(best_valid_projected_ppv)
+                and np.isclose(current_valid_projected_ppv, best_valid_projected_ppv)
+            )
+        )
+        is_better_checkpoint = (
+            current_valid_projected_ppv > best_valid_projected_ppv
+            or (same_projected_ppv and current_valid_fpr < best_valid_fpr)
+        )
+
+        if is_better_checkpoint:
+            best_valid_projected_ppv = current_valid_projected_ppv
+            best_valid_fpr = current_valid_fpr
             save_path = os.path.join(args.save_dir, f"{args.experiment_id}_best.pt")
             torch.save(model.state_dict(), save_path)
-            print(f"   -> Saved new best model to {save_path} (PPV@90Recall: {valid_ppv_at_90_recall:.4f})")
+            print(
+                f"   -> Saved new best model to {save_path} "
+                f"(1% PPV: {valid_projected_metrics['Projected PPV']:.4f}, "
+                f"FPR: {valid_metrics['FPR']:.4f}, Threshold: {valid_threshold:.4f})"
+            )
 
     final_save_path = os.path.join(args.save_dir, f"{args.experiment_id}_final.pt")
     torch.save(model.state_dict(), final_save_path)

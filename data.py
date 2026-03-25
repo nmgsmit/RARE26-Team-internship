@@ -76,36 +76,6 @@ def prepare_datasets(args, device):
         random_state=42
     )
 
-    # Match the challenge prevalence in validation by oversampling negatives
-    # until positives make up approximately 1% of the validation set.
-    pos_label = 1
-    neg_label = 0
-    pos_df = val_df[val_df["label"] == pos_label]
-    neg_df = val_df[val_df["label"] == neg_label]
-
-    if len(pos_df) == 0 or len(neg_df) == 0:
-        raise ValueError(
-            f"Validation split must contain both classes, found positives={len(pos_df)} negatives={len(neg_df)}."
-        )
-
-    target_negatives = len(pos_df) * 99
-    if target_negatives > len(neg_df):
-        extra_negatives = neg_df.sample(
-            n=target_negatives - len(neg_df),
-            replace=True,
-            random_state=args.seed,
-        )
-        val_df = pd.concat([pos_df, neg_df, extra_negatives], ignore_index=True)
-    else:
-        val_df = pd.concat([pos_df, neg_df], ignore_index=True)
-
-    val_df = val_df.sample(frac=1.0, random_state=args.seed).reset_index(drop=True)
-    val_pos_prevalence = len(pos_df) / len(val_df)
-    print(
-        f"Validation prevalence adjusted to {val_pos_prevalence:.2%} positives "
-        f"({len(pos_df)} positive / {len(val_df) - len(pos_df)} negative)."
-    )
-
     # 4. Create Datasets and Loaders
     train_ds = SimpleDataset(train_df, transform)
     valid_ds = SimpleDataset(val_df, transform)
