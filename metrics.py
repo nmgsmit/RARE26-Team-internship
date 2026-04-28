@@ -213,6 +213,50 @@ def collect_scores(model, loader, device):
     return y_true, y_score
 
 
+def compute_binary_dice_score(pred_mask, target_mask, eps=1e-8):
+    if torch.is_tensor(pred_mask):
+        pred_mask = pred_mask.detach().cpu().numpy()
+    if torch.is_tensor(target_mask):
+        target_mask = target_mask.detach().cpu().numpy()
+
+    pred_mask = np.asarray(pred_mask).astype(bool)
+    target_mask = np.asarray(target_mask).astype(bool)
+    if pred_mask.shape != target_mask.shape:
+        raise ValueError(
+            f"Dice masks must share the same shape, got {pred_mask.shape} and {target_mask.shape}."
+        )
+
+    intersection = float(np.logical_and(pred_mask, target_mask).sum())
+    denominator = float(pred_mask.sum() + target_mask.sum())
+    if denominator == 0.0:
+        return 1.0
+    return float((2.0 * intersection + eps) / (denominator + eps))
+
+
+def compute_batch_binary_dice_scores(pred_masks, target_masks, ignore_empty_targets=True, eps=1e-8):
+    if torch.is_tensor(pred_masks):
+        pred_masks = pred_masks.detach().cpu().numpy()
+    if torch.is_tensor(target_masks):
+        target_masks = target_masks.detach().cpu().numpy()
+
+    pred_masks = np.asarray(pred_masks)
+    target_masks = np.asarray(target_masks)
+    if pred_masks.shape != target_masks.shape:
+        raise ValueError(
+            f"Dice mask batches must share the same shape, got {pred_masks.shape} and {target_masks.shape}."
+        )
+
+    scores = []
+    skipped = 0
+    for pred_mask, target_mask in zip(pred_masks, target_masks):
+        if ignore_empty_targets and not np.any(target_mask):
+            scores.append(float("nan"))
+            skipped += 1
+            continue
+        scores.append(compute_binary_dice_score(pred_mask, target_mask, eps=eps))
+    return scores, skipped
+
+
 def log_metrics(
     epoch,
     optimizer,
@@ -224,6 +268,7 @@ def log_metrics(
     test_metrics,
     val_projected_metrics,
     test_projected_metrics,
+    extra_payload=None,
 ):
     learning_rate = optimizer.param_groups[0]["lr"]
     payload = OrderedDict([
@@ -257,4 +302,6 @@ def log_metrics(
         ("1%test/Projected FP per 1000", test_projected_metrics["Projected FP per 1000"]),
         ("1%test/Projected FN per 1000", test_projected_metrics["Projected FN per 1000"]),
     ])
+    if extra_payload:
+        payload.update(extra_payload)
     wandb.log(payload)

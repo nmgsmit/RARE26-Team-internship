@@ -10,4 +10,5 @@ python3 train.py \
     --experiment-id "Gastronet_DINOv2_linear_probe_336" \
     --backbone-name vit_base_patch14_reg4_dinov2 \
     --backbone-weights-path "${GASTRONET_CKPT}" \
-    --input-size 336
+    --input-size 336 \
+    --post-train-gradcam

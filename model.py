@@ -94,6 +94,28 @@ def load_backbone_weights(backbone, checkpoint_path):
             f"Unexpected keys: {unexpected}."
         )
 
+
+def load_model_checkpoint(model, checkpoint_path, strict=True):
+    checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    state_dict = _unwrap_checkpoint_state_dict(checkpoint)
+    cleaned_state_dict = {
+        key.removeprefix("module."): value
+        for key, value in state_dict.items()
+    }
+    incompatible = model.load_state_dict(cleaned_state_dict, strict=strict)
+    if strict and (incompatible.missing_keys or incompatible.unexpected_keys):
+        raise RuntimeError(
+            "Checkpoint is incompatible with the requested model architecture. "
+            f"Missing keys: {incompatible.missing_keys}. "
+            f"Unexpected keys: {incompatible.unexpected_keys}."
+        )
+    return incompatible
+
+
 class Model(nn.Module):
     def __init__(
         self,
@@ -130,7 +152,15 @@ class Model(nn.Module):
         self.head = nn.Linear(backbone_out, n_classes)
 
     def forward(self, x):
-        feats = self.backbone(x)
+        tokens = self.forward_tokens(x)
+        logits = self.forward_from_tokens(tokens)
+        return logits
+
+    def forward_tokens(self, x):
+        return self.backbone.forward_features(x)
+
+    def forward_from_tokens(self, tokens):
+        feats = self.backbone.forward_head(tokens, pre_logits=True)
         logits = self.head(feats)
         return logits
 
