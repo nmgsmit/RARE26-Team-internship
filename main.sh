@@ -11,4 +11,5 @@ python3 train.py \
     --backbone-name vit_base_patch14_reg4_dinov2 \
     --backbone-weights-path "${GASTRONET_CKPT}" \
     --input-size 336 \
-    --post-train-gradcam
+    --post-train-gradcam \
+    --post-train-gradcam-dataset-root ./data/EVC_Barretts_FullSet

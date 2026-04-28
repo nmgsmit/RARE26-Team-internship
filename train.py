@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
@@ -119,8 +120,11 @@ def get_args_parser():
     parser.add_argument(
         "--post-train-gradcam-dataset-root",
         type=str,
-        default="../data/EVC_Barretts_FullSet",
-        help="Root directory for the post-training Barrett Grad-CAM evaluation dataset.",
+        default=None,
+        help=(
+            "Root directory for the post-training Barrett Grad-CAM evaluation dataset. "
+            "Defaults to the parent directory of --testset-images-dir."
+        ),
     )
     parser.add_argument(
         "--post-train-gradcam-checkpoint",
@@ -389,12 +393,16 @@ def main(args):
     torch.save(model.state_dict(), final_save_path)
 
     if args.post_train_gradcam:
+        gradcam_dataset_root = (
+            args.post_train_gradcam_dataset_root
+            or str(Path(args.testset_images_dir).parent)
+        )
         print(
             f"Running post-training Barrett Grad-CAM evaluation from "
-            f"{args.post_train_gradcam_dataset_root} within the same W&B run..."
+            f"{gradcam_dataset_root} within the same W&B run..."
         )
         gradcam_loader, _, _, gradcam_dataset_qa = load_barrett_gradcam_dataset(
-            dataset_root=args.post_train_gradcam_dataset_root,
+            dataset_root=gradcam_dataset_root,
             batch_size=args.gradcam_batch_size,
             num_workers=args.num_workers,
             device=device,
