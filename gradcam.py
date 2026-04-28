@@ -110,16 +110,42 @@ def _mask_to_rgb(mask_tensor):
     return np.repeat(mask[..., None], 3, axis=2)
 
 
-def _soft_mask_to_rgb(mask_tensor):
-    mask = np.clip(np.rint(mask_tensor.detach().cpu().numpy() * 255.0), 0, 255).astype(np.uint8)
-    mask_img = Image.fromarray(mask, mode="L")
-    colored = ImageOps.colorize(mask_img, black="#000000", mid="#2ca02c", white="#f0f921")
-    return np.asarray(colored, dtype=np.uint8)
-
-
 def _blend_images(image_rgb, heatmap_rgb, alpha=0.4):
     blended = ((1.0 - alpha) * image_rgb.astype(np.float32)) + (alpha * heatmap_rgb.astype(np.float32))
     return np.clip(np.rint(blended), 0, 255).astype(np.uint8)
+
+
+def _compute_mask_edge(mask):
+    mask = np.asarray(mask).astype(bool)
+    if mask.ndim != 2:
+        raise ValueError(f"Expected a 2D mask for edge extraction, got shape {mask.shape}.")
+    if not mask.any():
+        return np.zeros_like(mask, dtype=bool)
+
+    eroded = np.zeros_like(mask, dtype=bool)
+    eroded[1:-1, 1:-1] = (
+        mask[1:-1, 1:-1]
+        & mask[:-2, 1:-1]
+        & mask[2:, 1:-1]
+        & mask[1:-1, :-2]
+        & mask[1:-1, 2:]
+    )
+    return mask & ~eroded
+
+
+def _overlay_soft_consensus(base_rgb, soft_mask_tensor, outline_threshold=0.5, max_alpha=0.55):
+    soft_mask = np.clip(soft_mask_tensor.detach().cpu().numpy().astype(np.float32), 0.0, 1.0)
+    alpha = (soft_mask[..., None] * max_alpha).astype(np.float32)
+    fill_color = np.asarray([255.0, 64.0, 64.0], dtype=np.float32)
+
+    overlay = (1.0 - alpha) * base_rgb.astype(np.float32) + alpha * fill_color.reshape(1, 1, 3)
+    overlay = np.clip(np.rint(overlay), 0, 255).astype(np.uint8)
+
+    outline_mask = _compute_mask_edge(soft_mask >= outline_threshold)
+    if outline_mask.any():
+        overlay[outline_mask] = np.asarray([255, 255, 255], dtype=np.uint8)
+
+    return overlay
 
 
 def _build_labeled_panel(columns, labels):
@@ -343,22 +369,19 @@ def _build_barrett_wandb_example(
     summary_text,
     display_threshold=0.5,
 ):
-    union_mask, majority_mask, soft_consensus = build_expert_consensus_masks(expert_masks)
-    pred_mask = (cam_tensor >= display_threshold).to(torch.float32)
+    _, _, soft_consensus = build_expert_consensus_masks(expert_masks)
 
     image_rgb = _image_tensor_to_rgb_uint8(image_tensor)
     heatmap_rgb = _heatmap_to_rgb(cam_tensor)
     overlay_rgb = _blend_images(image_rgb, heatmap_rgb)
-    pred_mask_rgb = _mask_to_rgb(pred_mask)
-    majority_rgb = _mask_to_rgb(majority_mask)
-    soft_consensus_rgb = _soft_mask_to_rgb(soft_consensus)
+    comparison_rgb = _overlay_soft_consensus(
+        overlay_rgb,
+        soft_consensus,
+        outline_threshold=display_threshold,
+    )
 
-    columns = [image_rgb, overlay_rgb, pred_mask_rgb, majority_rgb, soft_consensus_rgb]
-    labels = ["image", "gradcam", f"cam@{display_threshold:.2f}", "majority", "soft consensus"]
-
-    for expert_idx in range(expert_masks.shape[0]):
-        columns.append(_mask_to_rgb(expert_masks[expert_idx]))
-        labels.append(f"exp{expert_idx + 1}")
+    columns = [image_rgb, overlay_rgb, comparison_rgb]
+    labels = ["image", "gradcam", "gradcam + consensus"]
 
     panel = _build_labeled_panel(columns, labels)
     caption = (
@@ -393,8 +416,6 @@ def evaluate_gradcam_barrett_dataset(
     pairwise_iou_values = []
     positive_threshold_dice = {threshold: [] for threshold in thresholds}
     positive_threshold_iou = {threshold: [] for threshold in thresholds}
-    positive_threshold_area = {threshold: [] for threshold in thresholds}
-    negative_threshold_area = {threshold: [] for threshold in thresholds}
     negative_empty_masks = 0
     negative_nonempty_masks = 0
     positive_majority_empty_count = 0
@@ -440,7 +461,6 @@ def evaluate_gradcam_barrett_dataset(
                         for row in threshold_metrics:
                             positive_threshold_dice[row["threshold"]].append(row["mean_dice"])
                             positive_threshold_iou[row["threshold"]].append(row["mean_iou"])
-                            positive_threshold_area[row["threshold"]].append(row["area_fraction"])
 
                         positive_entries.append({
                             "image_path": image_path,
@@ -460,12 +480,6 @@ def evaluate_gradcam_barrett_dataset(
                         negative_nonempty_masks += nonempty_expert_mask_count
                         negative_empty_masks += expert_masks.shape[0] - nonempty_expert_mask_count
 
-                        display_area_fraction = float((cam_tensor >= display_threshold).detach().cpu().numpy().mean())
-                        for threshold in thresholds:
-                            negative_threshold_area[threshold].append(
-                                float((cam_tensor >= threshold).detach().cpu().numpy().mean())
-                            )
-
                         negative_entries.append({
                             "image_path": image_path,
                             "image_tensor": images[sample_idx].detach().cpu(),
@@ -473,13 +487,11 @@ def evaluate_gradcam_barrett_dataset(
                             "expert_masks": expert_masks.detach().cpu(),
                             "target_prob": target_prob,
                             "raw_max_activation": float(raw_cam_tensor.max().item()),
-                            "area_fraction_display": display_area_fraction,
                         })
     finally:
         if was_training:
             model.train()
 
-    payload = {}
     combined_dataset_qa = dict(dataset_qa or {})
     combined_dataset_qa.update({
         "negative_empty_mask_count": negative_empty_masks,
@@ -487,55 +499,40 @@ def evaluate_gradcam_barrett_dataset(
         "positive_majority_empty_count": positive_majority_empty_count,
     })
 
-    for key, value in combined_dataset_qa.items():
-        payload[f"{prefix}/dataset/{key}"] = value
-
-    payload[f"{prefix}/dataset/positive_pairwise_iou_mean"] = _finite_mean(pairwise_iou_values)
-    payload[f"{prefix}/dataset/positive_pairwise_iou_median"] = _finite_median(pairwise_iou_values)
-    payload[f"{prefix}/config/target_class"] = target_class
-    payload[f"{prefix}/config/display_threshold"] = display_threshold
-    payload[f"{prefix}/positive/sample_count"] = len(positive_entries)
-    payload[f"{prefix}/negative/sample_count"] = len(negative_entries)
-    payload[f"{prefix}/positive/mAP_consensus"] = _finite_mean(entry["ap_consensus"] for entry in positive_entries)
-    payload[f"{prefix}/positive/mAP_expert_mean"] = _finite_mean(entry["mean_expert_ap"] for entry in positive_entries)
-    payload[f"{prefix}/positive/mAP_expert_std_mean"] = _finite_mean(entry["expert_ap_std"] for entry in positive_entries)
-    payload[f"{prefix}/positive/soft_consensus_mass"] = _finite_mean(
+    summary_payload = {
+        f"{prefix}/positive/mAP_consensus": _finite_mean(entry["ap_consensus"] for entry in positive_entries),
+        f"{prefix}/positive/mAP_expert_mean": _finite_mean(entry["mean_expert_ap"] for entry in positive_entries),
+        f"{prefix}/positive/mAP_expert_std_mean": _finite_mean(entry["expert_ap_std"] for entry in positive_entries),
+        f"{prefix}/positive/soft_consensus_mass": _finite_mean(
         entry["soft_consensus_mass"] for entry in positive_entries
-    )
-    payload[f"{prefix}/positive/peak_hit_union"] = _finite_mean(entry["peak_hit_union"] for entry in positive_entries)
-    payload[f"{prefix}/positive/peak_hit_majority"] = _finite_mean(
+        ),
+        f"{prefix}/positive/peak_hit_union": _finite_mean(entry["peak_hit_union"] for entry in positive_entries),
+        f"{prefix}/positive/peak_hit_majority": _finite_mean(
         entry["peak_hit_majority"] for entry in positive_entries
-    )
-    payload[f"{prefix}/negative/mean_positive_class_probability"] = _finite_mean(
+        ),
+        f"{prefix}/negative/mean_positive_class_probability": _finite_mean(
         entry["target_prob"] for entry in negative_entries
-    )
-    payload[f"{prefix}/negative/mean_raw_max_activation"] = _finite_mean(
+        ),
+        f"{prefix}/negative/mean_raw_max_activation": _finite_mean(
         entry["raw_max_activation"] for entry in negative_entries
-    )
-    payload[f"{prefix}/negative/mean_area_fraction_at_{_format_threshold(display_threshold)}"] = _finite_mean(
-        entry["area_fraction_display"] for entry in negative_entries
-    )
+        ),
+        f"{prefix}/dataset/positive_pairwise_iou_mean": _finite_mean(pairwise_iou_values),
+        f"{prefix}/dataset/positive_pairwise_iou_median": _finite_median(pairwise_iou_values),
+        f"{prefix}/dataset/negative_empty_mask_count": negative_empty_masks,
+        f"{prefix}/dataset/negative_nonempty_mask_count": negative_nonempty_masks,
+        f"{prefix}/dataset/positive_majority_empty_count": positive_majority_empty_count,
+    }
 
     positive_dice_curve = []
     positive_iou_curve = []
-    negative_area_curve = []
     for threshold in thresholds:
-        threshold_key = _format_threshold(threshold)
         mean_dice = _finite_mean(positive_threshold_dice[threshold])
         mean_iou = _finite_mean(positive_threshold_iou[threshold])
-        mean_positive_area = _finite_mean(positive_threshold_area[threshold])
-        mean_negative_area = _finite_mean(negative_threshold_area[threshold])
-        payload[f"{prefix}/positive/dice_at_{threshold_key}"] = mean_dice
-        payload[f"{prefix}/positive/iou_at_{threshold_key}"] = mean_iou
-        payload[f"{prefix}/positive/area_fraction_at_{threshold_key}"] = mean_positive_area
-        payload[f"{prefix}/negative/area_fraction_at_{threshold_key}"] = mean_negative_area
         positive_dice_curve.append(mean_dice)
         positive_iou_curve.append(mean_iou)
-        negative_area_curve.append(mean_negative_area)
 
-    payload[f"{prefix}/positive/dice_auc"] = _normalized_curve_auc(positive_dice_curve, thresholds)
-    payload[f"{prefix}/positive/iou_auc"] = _normalized_curve_auc(positive_iou_curve, thresholds)
-    payload[f"{prefix}/negative/area_fraction_auc"] = _normalized_curve_auc(negative_area_curve, thresholds)
+    summary_payload[f"{prefix}/positive/dice_auc"] = _normalized_curve_auc(positive_dice_curve, thresholds)
+    summary_payload[f"{prefix}/positive/iou_auc"] = _normalized_curve_auc(positive_iou_curve, thresholds)
 
     best_positive_entries = sorted(
         [entry for entry in positive_entries if np.isfinite(entry["ap_consensus"])],
@@ -550,14 +547,14 @@ def evaluate_gradcam_barrett_dataset(
         negative_entries,
         key=lambda entry: (
             entry["target_prob"],
-            entry["area_fraction_display"],
             entry["raw_max_activation"],
         ),
         reverse=True,
     )[:log_hard_neg_k]
 
+    media_payload = {}
     if best_positive_entries:
-        payload[f"{prefix}/positive/examples_best"] = [
+        media_payload[f"{prefix}/positive/examples_best"] = [
             _build_barrett_wandb_example(
                 entry["image_tensor"],
                 entry["cam_tensor"],
@@ -574,7 +571,7 @@ def evaluate_gradcam_barrett_dataset(
             for entry in best_positive_entries
         ]
     if worst_positive_entries:
-        payload[f"{prefix}/positive/examples_worst"] = [
+        media_payload[f"{prefix}/positive/examples_worst"] = [
             _build_barrett_wandb_example(
                 entry["image_tensor"],
                 entry["cam_tensor"],
@@ -591,7 +588,7 @@ def evaluate_gradcam_barrett_dataset(
             for entry in worst_positive_entries
         ]
     if hard_negative_entries:
-        payload[f"{prefix}/negative/examples_hard"] = [
+        media_payload[f"{prefix}/negative/examples_hard"] = [
             _build_barrett_wandb_example(
                 entry["image_tensor"],
                 entry["cam_tensor"],
@@ -600,8 +597,7 @@ def evaluate_gradcam_barrett_dataset(
                 target_class,
                 entry["target_prob"],
                 (
-                    f"neg prob={entry['target_prob']:.3f} | raw max={entry['raw_max_activation']:.4f} | "
-                    f"area@{display_threshold:.2f}={entry['area_fraction_display']:.3f}"
+                    f"neg prob={entry['target_prob']:.3f} | raw max={entry['raw_max_activation']:.4f}"
                 ),
                 display_threshold=display_threshold,
             )
@@ -621,13 +617,14 @@ def evaluate_gradcam_barrett_dataset(
             {
                 "image_path": entry["image_path"],
                 "target_prob": entry["target_prob"],
-                "area_fraction_display": entry["area_fraction_display"],
+                "raw_max_activation": entry["raw_max_activation"],
             }
             for entry in hard_negative_entries
         ],
     }
     return {
-        "payload": payload,
+        "media_payload": media_payload,
+        "summary_payload": summary_payload,
         "dataset_qa": combined_dataset_qa,
         "ranking_metadata": ranking_metadata,
     }

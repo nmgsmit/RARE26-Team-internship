@@ -36,6 +36,12 @@ def get_args_parser():
         default=DEFAULT_THRESHOLDS,
         help="Comma-separated Grad-CAM thresholds used for Dice/IoU sweeps.",
     )
+    parser.add_argument(
+        "--display-threshold",
+        type=float,
+        default=0.5,
+        help="Consensus-agreement threshold used for the white outline in qualitative Grad-CAM panels.",
+    )
     parser.add_argument("--log-best-k", type=int, default=8, help="Number of best positive examples to log.")
     parser.add_argument("--log-worst-k", type=int, default=8, help="Number of worst positive examples to log.")
     parser.add_argument(
@@ -107,22 +113,26 @@ def main(args):
         device=device,
         thresholds=args.gradcam_thresholds,
         target_class=args.gradcam_target_class,
+        display_threshold=args.display_threshold,
         log_best_k=args.log_best_k,
         log_worst_k=args.log_worst_k,
         log_hard_neg_k=args.log_hard_neg_k,
         prefix="gradcam",
         dataset_qa=dataset_qa,
     )
-    wandb.log(result["payload"])
+    if result["media_payload"]:
+        wandb.log(result["media_payload"])
+    for key, value in result["summary_payload"].items():
+        wandb.summary[key] = value
 
-    payload = result["payload"]
+    summary = result["summary_payload"]
     print(
         "Grad-CAM summary | "
-        f"mAP consensus: {payload['gradcam/positive/mAP_consensus']:.4f} | "
-        f"Expert mAP mean: {payload['gradcam/positive/mAP_expert_mean']:.4f} | "
-        f"Dice AUC: {payload['gradcam/positive/dice_auc']:.4f} | "
-        f"IoU AUC: {payload['gradcam/positive/iou_auc']:.4f} | "
-        f"Negative mean prob: {payload['gradcam/negative/mean_positive_class_probability']:.4f}"
+        f"mAP consensus: {summary['gradcam/positive/mAP_consensus']:.4f} | "
+        f"Expert mAP mean: {summary['gradcam/positive/mAP_expert_mean']:.4f} | "
+        f"Dice AUC: {summary['gradcam/positive/dice_auc']:.4f} | "
+        f"IoU AUC: {summary['gradcam/positive/iou_auc']:.4f} | "
+        f"Negative mean prob: {summary['gradcam/negative/mean_positive_class_probability']:.4f}"
     )
     wandb.finish()
 

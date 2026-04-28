@@ -143,7 +143,7 @@ def get_args_parser():
         "--post-train-gradcam-display-threshold",
         type=float,
         default=0.5,
-        help="Display threshold used in post-training Grad-CAM qualitative panels.",
+        help="Consensus-agreement threshold used for the white outline in post-training Grad-CAM panels.",
     )
     parser.add_argument(
         "--post-train-gradcam-log-best-k",
@@ -435,14 +435,17 @@ def main(args):
             prefix="gradcam",
             dataset_qa=gradcam_dataset_qa,
         )
-        wandb.log(gradcam_result["payload"])
+        if gradcam_result["media_payload"]:
+            wandb.log(gradcam_result["media_payload"])
+        for key, value in gradcam_result["summary_payload"].items():
+            wandb.summary[key] = value
         print(
             "Post-training Grad-CAM summary | "
-            f"mAP consensus: {gradcam_result['payload']['gradcam/positive/mAP_consensus']:.4f} | "
-            f"Expert mAP mean: {gradcam_result['payload']['gradcam/positive/mAP_expert_mean']:.4f} | "
-            f"Dice AUC: {gradcam_result['payload']['gradcam/positive/dice_auc']:.4f} | "
-            f"IoU AUC: {gradcam_result['payload']['gradcam/positive/iou_auc']:.4f} | "
-            f"Negative mean prob: {gradcam_result['payload']['gradcam/negative/mean_positive_class_probability']:.4f}"
+            f"mAP consensus: {gradcam_result['summary_payload']['gradcam/positive/mAP_consensus']:.4f} | "
+            f"Expert mAP mean: {gradcam_result['summary_payload']['gradcam/positive/mAP_expert_mean']:.4f} | "
+            f"Dice AUC: {gradcam_result['summary_payload']['gradcam/positive/dice_auc']:.4f} | "
+            f"IoU AUC: {gradcam_result['summary_payload']['gradcam/positive/iou_auc']:.4f} | "
+            f"Negative mean prob: {gradcam_result['summary_payload']['gradcam/negative/mean_positive_class_probability']:.4f}"
         )
 
     print(f"Class mapping: {class_names}")
