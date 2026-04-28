@@ -110,9 +110,11 @@ def _mask_to_rgb(mask_tensor):
     return np.repeat(mask[..., None], 3, axis=2)
 
 
-def _blend_images(image_rgb, heatmap_rgb, alpha=0.4):
-    blended = ((1.0 - alpha) * image_rgb.astype(np.float32)) + (alpha * heatmap_rgb.astype(np.float32))
-    return np.clip(np.rint(blended), 0, 255).astype(np.uint8)
+def _overlay_heatmap_on_image(image_rgb, cam_tensor, max_alpha=0.8):
+    heatmap_rgb = _heatmap_to_rgb(cam_tensor).astype(np.float32)
+    alpha = np.clip(cam_tensor.detach().cpu().numpy().astype(np.float32), 0.0, 1.0)[..., None] * max_alpha
+    overlay = ((1.0 - alpha) * image_rgb.astype(np.float32)) + (alpha * heatmap_rgb)
+    return np.clip(np.rint(overlay), 0, 255).astype(np.uint8)
 
 
 def _compute_mask_edge(mask):
@@ -169,8 +171,7 @@ def _build_labeled_panel(columns, labels):
 
 def _build_wandb_example(image_tensor, cam_tensor, pred_mask, gt_mask, image_path, target_class, class_prob, dice_score):
     image_rgb = _image_tensor_to_rgb_uint8(image_tensor)
-    heatmap_rgb = _heatmap_to_rgb(cam_tensor)
-    overlay_rgb = _blend_images(image_rgb, heatmap_rgb)
+    overlay_rgb = _overlay_heatmap_on_image(image_rgb, cam_tensor)
     pred_mask_rgb = _mask_to_rgb(pred_mask)
     gt_mask_rgb = _mask_to_rgb(gt_mask)
     panel = _build_labeled_panel(
@@ -372,8 +373,7 @@ def _build_barrett_wandb_example(
     _, _, soft_consensus = build_expert_consensus_masks(expert_masks)
 
     image_rgb = _image_tensor_to_rgb_uint8(image_tensor)
-    heatmap_rgb = _heatmap_to_rgb(cam_tensor)
-    overlay_rgb = _blend_images(image_rgb, heatmap_rgb)
+    overlay_rgb = _overlay_heatmap_on_image(image_rgb, cam_tensor)
     comparison_rgb = _overlay_soft_consensus(
         overlay_rgb,
         soft_consensus,
@@ -487,6 +487,8 @@ def evaluate_gradcam_barrett_dataset(
                             "expert_masks": expert_masks.detach().cpu(),
                             "target_prob": target_prob,
                             "raw_max_activation": float(raw_cam_tensor.max().item()),
+                            "soft_consensus_mass": compute_soft_mask_mass(cam_tensor, soft_consensus),
+                            "peak_hit_majority": compute_peak_hit(cam_tensor, majority_mask),
                         })
     finally:
         if was_training:
@@ -498,8 +500,18 @@ def evaluate_gradcam_barrett_dataset(
         "negative_nonempty_mask_count": negative_nonempty_masks,
         "positive_majority_empty_count": positive_majority_empty_count,
     })
+    all_entries = positive_entries + negative_entries
 
     summary_payload = {
+        f"{prefix}/overall/mean_target_class_probability": _finite_mean(
+            entry["target_prob"] for entry in all_entries
+        ),
+        f"{prefix}/overall/mean_soft_consensus_mass": _finite_mean(
+            entry["soft_consensus_mass"] for entry in all_entries
+        ),
+        f"{prefix}/overall/mean_peak_hit_majority": _finite_mean(
+            entry["peak_hit_majority"] for entry in all_entries
+        ),
         f"{prefix}/positive/mAP_consensus": _finite_mean(entry["ap_consensus"] for entry in positive_entries),
         f"{prefix}/positive/mAP_expert_mean": _finite_mean(entry["mean_expert_ap"] for entry in positive_entries),
         f"{prefix}/positive/mAP_expert_std_mean": _finite_mean(entry["expert_ap_std"] for entry in positive_entries),
@@ -622,8 +634,20 @@ def evaluate_gradcam_barrett_dataset(
             for entry in hard_negative_entries
         ],
     }
+    scalar_payload = {
+        f"{prefix}/overall/mean_target_class_probability": summary_payload[
+            f"{prefix}/overall/mean_target_class_probability"
+        ],
+        f"{prefix}/overall/mean_soft_consensus_mass": summary_payload[
+            f"{prefix}/overall/mean_soft_consensus_mass"
+        ],
+        f"{prefix}/overall/mean_peak_hit_majority": summary_payload[
+            f"{prefix}/overall/mean_peak_hit_majority"
+        ],
+    }
     return {
         "media_payload": media_payload,
+        "scalar_payload": scalar_payload,
         "summary_payload": summary_payload,
         "dataset_qa": combined_dataset_qa,
         "ranking_metadata": ranking_metadata,

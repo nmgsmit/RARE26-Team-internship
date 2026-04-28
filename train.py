@@ -437,6 +437,8 @@ def main(args):
         )
         if gradcam_result["media_payload"]:
             wandb.log(gradcam_result["media_payload"])
+        if gradcam_result["scalar_payload"]:
+            wandb.log(gradcam_result["scalar_payload"])
         for key, value in gradcam_result["summary_payload"].items():
             wandb.summary[key] = value
         print(

@@ -122,6 +122,8 @@ def main(args):
     )
     if result["media_payload"]:
         wandb.log(result["media_payload"])
+    if result["scalar_payload"]:
+        wandb.log(result["scalar_payload"])
     for key, value in result["summary_payload"].items():
         wandb.summary[key] = value
 
