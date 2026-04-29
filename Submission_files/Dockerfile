@@ -6,8 +6,11 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# No extra dependencies needed
-COPY predict.py /app/predict.py
+RUN python -m pip install --no-cache-dir torch torchvision timm pillow
+
+COPY Submission_files/predict.py /app/predict.py
+COPY model.py /app/model.py
+COPY model.pt /app/model.pt
 
 # Run prediction script on container start
 ENTRYPOINT ["python", "/app/predict.py"]

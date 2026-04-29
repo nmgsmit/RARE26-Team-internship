@@ -34,7 +34,7 @@ def prepare_datasets(args, device):
     # Compose transforms
     transform = Compose([
         ToImage(),
-        Resize((224, 224)),
+        Resize((args.input_size, args.input_size)),
         ToDtype(torch.float32, scale=True),
         Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
@@ -81,7 +81,7 @@ def prepare_datasets(args, device):
     # 4. Create Datasets and Loaders
     train_ds = SimpleDataset(train_df, transform)
     valid_ds = SimpleDataset(val_df, transform)
-    
+
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers
     )
