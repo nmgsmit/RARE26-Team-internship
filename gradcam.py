@@ -41,6 +41,16 @@ def _get_patch_grid_size(model):
     return tuple(grid_size)
 
 
+def _get_vit_gradcam_target_layer(model):
+    blocks = getattr(model.backbone, "blocks", None)
+    if blocks:
+        last_block = blocks[-1]
+        target_layer = getattr(last_block, "norm1", None)
+        if target_layer is not None:
+            return target_layer
+    return None
+
+
 def _normalize_heatmaps(cams, eps=1e-8):
     flat = cams.flatten(start_dim=1)
     mins = flat.min(dim=1, keepdim=True).values
@@ -56,17 +66,35 @@ def compute_vit_gradcam_batch(model, images, target_class=1, return_raw=False):
     images = images.detach().clone().requires_grad_(True)
     model.zero_grad(set_to_none=True)
 
-    tokens, logits = _forward_tokens_and_logits(model, images)
+    captured = {}
+    target_layer = _get_vit_gradcam_target_layer(model)
+    hook_handle = None
+    if target_layer is not None:
+        def _capture_activations(_module, _inputs, output):
+            captured["tokens"] = output
+
+        hook_handle = target_layer.register_forward_hook(_capture_activations)
+
+    try:
+        tokens, logits = _forward_tokens_and_logits(model, images)
+    finally:
+        if hook_handle is not None:
+            hook_handle.remove()
+
     num_classes = logits.shape[1]
     if target_class < 0 or target_class >= num_classes:
         raise ValueError(f"Target class {target_class} is out of range for {num_classes} classes.")
 
     target_scores = logits[:, target_class].sum()
-    token_grads = torch.autograd.grad(target_scores, tokens, retain_graph=False, create_graph=False)[0]
+    cam_tokens = captured.get("tokens", tokens)
+    if cam_tokens.ndim != 3:
+        raise ValueError(f"Expected token activations with shape [B, N, C], got {tuple(cam_tokens.shape)}.")
+
+    token_grads = torch.autograd.grad(target_scores, cam_tokens, retain_graph=False, create_graph=False)[0]
 
     num_prefix_tokens = _get_num_prefix_tokens(model)
     grid_h, grid_w = _get_patch_grid_size(model)
-    patch_tokens = tokens[:, num_prefix_tokens:, :]
+    patch_tokens = cam_tokens[:, num_prefix_tokens:, :]
     patch_grads = token_grads[:, num_prefix_tokens:, :]
 
     expected_patch_count = grid_h * grid_w

@@ -435,10 +435,13 @@ def main(args):
             prefix="gradcam",
             dataset_qa=gradcam_dataset_qa,
         )
-        if gradcam_result["media_payload"]:
-            wandb.log(gradcam_result["media_payload"])
+        post_train_gradcam_payload = {}
         if gradcam_result["scalar_payload"]:
-            wandb.log(gradcam_result["scalar_payload"])
+            post_train_gradcam_payload.update(gradcam_result["scalar_payload"])
+        if gradcam_result["media_payload"]:
+            post_train_gradcam_payload.update(gradcam_result["media_payload"])
+        if post_train_gradcam_payload:
+            wandb.log(post_train_gradcam_payload)
         for key, value in gradcam_result["summary_payload"].items():
             wandb.summary[key] = value
         print(
