@@ -12,6 +12,8 @@ from metrics import compute_batch_binary_dice_scores, compute_binary_dice_score
 
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(3, 1, 1)
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(3, 1, 1)
+FLAT_CAM_STD_EPS = 1e-6
+NEAR_ZERO_CAM_MAX_EPS = 1e-6
 
 
 def _forward_tokens_and_logits(model, images):
@@ -335,6 +337,21 @@ def _normalized_curve_auc(values, thresholds):
     return float(np.trapz(ys, xs) / span)
 
 
+def _compute_cam_activation_stats(raw_cam_tensor):
+    raw_cam = raw_cam_tensor.detach().cpu().numpy().astype(np.float64)
+    raw_max_activation = float(np.max(raw_cam))
+    raw_std_activation = float(np.std(raw_cam))
+    is_flat_or_near_zero = (
+        raw_std_activation <= FLAT_CAM_STD_EPS
+        or raw_max_activation <= NEAR_ZERO_CAM_MAX_EPS
+    )
+    return {
+        "raw_max_activation": raw_max_activation,
+        "raw_std_activation": raw_std_activation,
+        "is_flat_or_near_zero": float(is_flat_or_near_zero),
+    }
+
+
 def _format_threshold(threshold):
     return f"{threshold:.2f}"
 
@@ -440,6 +457,7 @@ def evaluate_gradcam_barrett_dataset(
                     image_path = image_paths[sample_idx]
                     cam_tensor = cams[sample_idx]
                     raw_cam_tensor = raw_cams[sample_idx]
+                    cam_activation_stats = _compute_cam_activation_stats(raw_cam_tensor)
                     target_prob = float(probs[sample_idx].item())
                     union_mask, majority_mask, soft_consensus = build_expert_consensus_masks(expert_masks)
 
@@ -474,6 +492,9 @@ def evaluate_gradcam_barrett_dataset(
                             "soft_consensus_mass": compute_soft_mask_mass(cam_tensor, soft_consensus),
                             "peak_hit_union": compute_peak_hit(cam_tensor, union_mask),
                             "peak_hit_majority": compute_peak_hit(cam_tensor, majority_mask),
+                            "raw_max_activation": cam_activation_stats["raw_max_activation"],
+                            "raw_std_activation": cam_activation_stats["raw_std_activation"],
+                            "is_flat_or_near_zero": cam_activation_stats["is_flat_or_near_zero"],
                         })
                     else:
                         nonempty_expert_mask_count = int(torch.sum(torch.any(expert_masks > 0, dim=(1, 2))).item())
@@ -486,7 +507,9 @@ def evaluate_gradcam_barrett_dataset(
                             "cam_tensor": cam_tensor.detach().cpu(),
                             "expert_masks": expert_masks.detach().cpu(),
                             "target_prob": target_prob,
-                            "raw_max_activation": float(raw_cam_tensor.max().item()),
+                            "raw_max_activation": cam_activation_stats["raw_max_activation"],
+                            "raw_std_activation": cam_activation_stats["raw_std_activation"],
+                            "is_flat_or_near_zero": cam_activation_stats["is_flat_or_near_zero"],
                             "soft_consensus_mass": compute_soft_mask_mass(cam_tensor, soft_consensus),
                             "peak_hit_majority": compute_peak_hit(cam_tensor, majority_mask),
                         })
@@ -511,6 +534,9 @@ def evaluate_gradcam_barrett_dataset(
         ),
         f"{prefix}/overall/mean_peak_hit_majority": _finite_mean(
             entry["peak_hit_majority"] for entry in all_entries
+        ),
+        f"{prefix}/overall/fraction_flat_or_near_zero_cams": _finite_mean(
+            entry["is_flat_or_near_zero"] for entry in all_entries
         ),
         f"{prefix}/positive/mAP_consensus": _finite_mean(entry["ap_consensus"] for entry in positive_entries),
         f"{prefix}/positive/mAP_expert_mean": _finite_mean(entry["mean_expert_ap"] for entry in positive_entries),
@@ -643,6 +669,9 @@ def evaluate_gradcam_barrett_dataset(
         ],
         f"{prefix}/overall/mean_peak_hit_majority": summary_payload[
             f"{prefix}/overall/mean_peak_hit_majority"
+        ],
+        f"{prefix}/overall/fraction_flat_or_near_zero_cams": summary_payload[
+            f"{prefix}/overall/fraction_flat_or_near_zero_cams"
         ],
     }
     return {

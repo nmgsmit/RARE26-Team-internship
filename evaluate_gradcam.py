@@ -134,7 +134,8 @@ def main(args):
         f"Expert mAP mean: {summary['gradcam/positive/mAP_expert_mean']:.4f} | "
         f"Dice AUC: {summary['gradcam/positive/dice_auc']:.4f} | "
         f"IoU AUC: {summary['gradcam/positive/iou_auc']:.4f} | "
-        f"Negative mean prob: {summary['gradcam/negative/mean_positive_class_probability']:.4f}"
+        f"Negative mean prob: {summary['gradcam/negative/mean_positive_class_probability']:.4f} | "
+        f"Flat/near-zero CAM frac: {summary['gradcam/overall/fraction_flat_or_near_zero_cams']:.4f}"
     )
     wandb.finish()
 
