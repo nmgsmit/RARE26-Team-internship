@@ -6,7 +6,12 @@ import numpy as np
 from PIL import Image
 import torch
 
-from gradcam import build_expert_consensus_masks, compute_pixel_average_precision
+from gradcam import (
+    _compute_cam_activation_stats,
+    _select_display_cam_tensor,
+    build_expert_consensus_masks,
+    compute_pixel_average_precision,
+)
 from testdata import build_barrett_gradcam_samples
 
 
@@ -59,6 +64,31 @@ class GradcamMetricTests(unittest.TestCase):
         self.assertTrue(torch.equal(union_mask, expected_union))
         self.assertTrue(torch.equal(majority_mask, expected_majority))
         self.assertTrue(torch.allclose(soft_consensus, expected_soft))
+
+    def test_signed_cam_stats_do_not_mark_negative_structure_as_flat(self):
+        signed_cam = torch.tensor([
+            [-0.6, -0.2],
+            [-0.1, -0.4],
+        ], dtype=torch.float32)
+
+        stats = _compute_cam_activation_stats(signed_cam)
+
+        self.assertGreater(stats["raw_max_abs_activation"], 0.0)
+        self.assertGreater(stats["raw_std_activation"], 0.0)
+        self.assertEqual(stats["is_flat_or_near_zero"], 0.0)
+
+    def test_display_cam_falls_back_to_abs_signed_map_when_positive_cam_is_blank(self):
+        cam_tensor = torch.zeros((2, 2), dtype=torch.float32)
+        signed_cam = torch.tensor([
+            [-0.8, -0.2],
+            [-0.1, -0.4],
+        ], dtype=torch.float32)
+
+        display_cam, label = _select_display_cam_tensor(cam_tensor, signed_cam)
+
+        self.assertEqual(label, "abs(signed cam)")
+        self.assertAlmostEqual(float(display_cam.max().item()), 1.0, places=6)
+        self.assertGreater(float(display_cam.std().item()), 0.0)
 
 
 class BarrettGroupingTests(unittest.TestCase):

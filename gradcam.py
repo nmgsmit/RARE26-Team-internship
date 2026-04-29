@@ -77,11 +77,17 @@ def compute_vit_gradcam_batch(model, images, target_class=1, return_raw=False):
         )
 
     channel_weights = patch_grads.mean(dim=1, keepdim=True)
-    cams = torch.relu(torch.sum(patch_tokens * channel_weights, dim=-1))
-    cams = cams.view(images.shape[0], 1, grid_h, grid_w)
-    cams = F.interpolate(cams, size=images.shape[-2:], mode="bilinear", align_corners=False).squeeze(1)
-    raw_cams = cams
-    cams = _normalize_heatmaps(raw_cams)
+    signed_cams = torch.sum(patch_tokens * channel_weights, dim=-1)
+    signed_cams = signed_cams.view(images.shape[0], 1, grid_h, grid_w)
+    signed_cams = F.interpolate(
+        signed_cams,
+        size=images.shape[-2:],
+        mode="bilinear",
+        align_corners=False,
+    ).squeeze(1)
+    cams = torch.relu(signed_cams)
+    raw_cams = signed_cams
+    cams = _normalize_heatmaps(cams)
 
     target_probs = torch.softmax(logits, dim=1)[:, target_class]
     if return_raw:
@@ -117,6 +123,18 @@ def _overlay_heatmap_on_image(image_rgb, cam_tensor, max_alpha=0.8):
     alpha = np.clip(cam_tensor.detach().cpu().numpy().astype(np.float32), 0.0, 1.0)[..., None] * max_alpha
     overlay = ((1.0 - alpha) * image_rgb.astype(np.float32)) + (alpha * heatmap_rgb)
     return np.clip(np.rint(overlay), 0, 255).astype(np.uint8)
+
+
+def _select_display_cam_tensor(cam_tensor, raw_cam_tensor, eps=1e-8):
+    if float(torch.max(cam_tensor).item()) > eps:
+        return cam_tensor, "gradcam"
+
+    raw_abs = raw_cam_tensor.detach().abs()
+    if float(torch.max(raw_abs).item()) <= eps:
+        return cam_tensor, "gradcam"
+
+    display_cam = _normalize_heatmaps(raw_abs.unsqueeze(0), eps=eps).squeeze(0)
+    return display_cam, "abs(signed cam)"
 
 
 def _compute_mask_edge(mask):
@@ -171,14 +189,24 @@ def _build_labeled_panel(columns, labels):
     return np.asarray(canvas, dtype=np.uint8)
 
 
-def _build_wandb_example(image_tensor, cam_tensor, pred_mask, gt_mask, image_path, target_class, class_prob, dice_score):
+def _build_wandb_example(
+    image_tensor,
+    cam_tensor,
+    pred_mask,
+    gt_mask,
+    image_path,
+    target_class,
+    class_prob,
+    dice_score,
+    cam_label="gradcam",
+):
     image_rgb = _image_tensor_to_rgb_uint8(image_tensor)
     overlay_rgb = _overlay_heatmap_on_image(image_rgb, cam_tensor)
     pred_mask_rgb = _mask_to_rgb(pred_mask)
     gt_mask_rgb = _mask_to_rgb(gt_mask)
     panel = _build_labeled_panel(
         [image_rgb, overlay_rgb, pred_mask_rgb, gt_mask_rgb],
-        ["image", "gradcam", "cam mask", "gt mask"],
+        ["image", cam_label, "cam mask", "gt mask"],
     )
 
     dice_text = "skipped (empty mask)" if not np.isfinite(dice_score) else f"{dice_score:.3f}"
@@ -340,13 +368,17 @@ def _normalized_curve_auc(values, thresholds):
 def _compute_cam_activation_stats(raw_cam_tensor):
     raw_cam = raw_cam_tensor.detach().cpu().numpy().astype(np.float64)
     raw_max_activation = float(np.max(raw_cam))
+    raw_min_activation = float(np.min(raw_cam))
+    raw_max_abs_activation = float(np.max(np.abs(raw_cam)))
     raw_std_activation = float(np.std(raw_cam))
     is_flat_or_near_zero = (
         raw_std_activation <= FLAT_CAM_STD_EPS
-        or raw_max_activation <= NEAR_ZERO_CAM_MAX_EPS
+        or raw_max_abs_activation <= NEAR_ZERO_CAM_MAX_EPS
     )
     return {
         "raw_max_activation": raw_max_activation,
+        "raw_min_activation": raw_min_activation,
+        "raw_max_abs_activation": raw_max_abs_activation,
         "raw_std_activation": raw_std_activation,
         "is_flat_or_near_zero": float(is_flat_or_near_zero),
     }
@@ -386,6 +418,7 @@ def _build_barrett_wandb_example(
     class_prob,
     summary_text,
     display_threshold=0.5,
+    cam_label="gradcam",
 ):
     _, _, soft_consensus = build_expert_consensus_masks(expert_masks)
 
@@ -398,7 +431,7 @@ def _build_barrett_wandb_example(
     )
 
     columns = [image_rgb, overlay_rgb, comparison_rgb]
-    labels = ["image", "gradcam", "gradcam + consensus"]
+    labels = ["image", cam_label, f"{cam_label} + consensus"]
 
     panel = _build_labeled_panel(columns, labels)
     caption = (
@@ -458,6 +491,10 @@ def evaluate_gradcam_barrett_dataset(
                     cam_tensor = cams[sample_idx]
                     raw_cam_tensor = raw_cams[sample_idx]
                     cam_activation_stats = _compute_cam_activation_stats(raw_cam_tensor)
+                    display_cam_tensor, display_cam_label = _select_display_cam_tensor(
+                        cam_tensor,
+                        raw_cam_tensor,
+                    )
                     target_prob = float(probs[sample_idx].item())
                     union_mask, majority_mask, soft_consensus = build_expert_consensus_masks(expert_masks)
 
@@ -484,6 +521,8 @@ def evaluate_gradcam_barrett_dataset(
                             "image_path": image_path,
                             "image_tensor": images[sample_idx].detach().cpu(),
                             "cam_tensor": cam_tensor.detach().cpu(),
+                            "display_cam_tensor": display_cam_tensor.detach().cpu(),
+                            "display_cam_label": display_cam_label,
                             "expert_masks": expert_masks.detach().cpu(),
                             "target_prob": target_prob,
                             "ap_consensus": ap_consensus,
@@ -493,6 +532,7 @@ def evaluate_gradcam_barrett_dataset(
                             "peak_hit_union": compute_peak_hit(cam_tensor, union_mask),
                             "peak_hit_majority": compute_peak_hit(cam_tensor, majority_mask),
                             "raw_max_activation": cam_activation_stats["raw_max_activation"],
+                            "raw_max_abs_activation": cam_activation_stats["raw_max_abs_activation"],
                             "raw_std_activation": cam_activation_stats["raw_std_activation"],
                             "is_flat_or_near_zero": cam_activation_stats["is_flat_or_near_zero"],
                         })
@@ -505,9 +545,12 @@ def evaluate_gradcam_barrett_dataset(
                             "image_path": image_path,
                             "image_tensor": images[sample_idx].detach().cpu(),
                             "cam_tensor": cam_tensor.detach().cpu(),
+                            "display_cam_tensor": display_cam_tensor.detach().cpu(),
+                            "display_cam_label": display_cam_label,
                             "expert_masks": expert_masks.detach().cpu(),
                             "target_prob": target_prob,
                             "raw_max_activation": cam_activation_stats["raw_max_activation"],
+                            "raw_max_abs_activation": cam_activation_stats["raw_max_abs_activation"],
                             "raw_std_activation": cam_activation_stats["raw_std_activation"],
                             "is_flat_or_near_zero": cam_activation_stats["is_flat_or_near_zero"],
                             "soft_consensus_mass": compute_soft_mask_mass(cam_tensor, soft_consensus),
@@ -595,7 +638,7 @@ def evaluate_gradcam_barrett_dataset(
         media_payload[f"{prefix}/positive/examples_best"] = [
             _build_barrett_wandb_example(
                 entry["image_tensor"],
-                entry["cam_tensor"],
+                entry["display_cam_tensor"],
                 entry["expert_masks"],
                 entry["image_path"],
                 target_class,
@@ -605,6 +648,7 @@ def evaluate_gradcam_barrett_dataset(
                     f"mass={entry['soft_consensus_mass']:.3f}"
                 ),
                 display_threshold=display_threshold,
+                cam_label=entry["display_cam_label"],
             )
             for entry in best_positive_entries
         ]
@@ -612,7 +656,7 @@ def evaluate_gradcam_barrett_dataset(
         media_payload[f"{prefix}/positive/examples_worst"] = [
             _build_barrett_wandb_example(
                 entry["image_tensor"],
-                entry["cam_tensor"],
+                entry["display_cam_tensor"],
                 entry["expert_masks"],
                 entry["image_path"],
                 target_class,
@@ -622,6 +666,7 @@ def evaluate_gradcam_barrett_dataset(
                     f"mass={entry['soft_consensus_mass']:.3f}"
                 ),
                 display_threshold=display_threshold,
+                cam_label=entry["display_cam_label"],
             )
             for entry in worst_positive_entries
         ]
@@ -629,7 +674,7 @@ def evaluate_gradcam_barrett_dataset(
         media_payload[f"{prefix}/negative/examples_hard"] = [
             _build_barrett_wandb_example(
                 entry["image_tensor"],
-                entry["cam_tensor"],
+                entry["display_cam_tensor"],
                 entry["expert_masks"],
                 entry["image_path"],
                 target_class,
@@ -638,6 +683,7 @@ def evaluate_gradcam_barrett_dataset(
                     f"neg prob={entry['target_prob']:.3f} | raw max={entry['raw_max_activation']:.4f}"
                 ),
                 display_threshold=display_threshold,
+                cam_label=entry["display_cam_label"],
             )
             for entry in hard_negative_entries
         ]
@@ -713,7 +759,12 @@ def evaluate_gradcam_segmentation_dataset(
                 images = images.to(device)
                 masks = masks.to(device)
 
-                cams, probs = compute_vit_gradcam_batch(model, images, target_class=target_class)
+                cams, probs, raw_cams = compute_vit_gradcam_batch(
+                    model,
+                    images,
+                    target_class=target_class,
+                    return_raw=True,
+                )
                 pred_masks = (cams >= threshold).to(dtype=masks.dtype)
 
                 batch_dice_scores, batch_skipped = compute_batch_binary_dice_scores(
@@ -732,16 +783,21 @@ def evaluate_gradcam_segmentation_dataset(
                     continue
 
                 for sample_idx in range(min(images.shape[0], remaining_slots)):
+                    display_cam_tensor, display_cam_label = _select_display_cam_tensor(
+                        cams[sample_idx],
+                        raw_cams[sample_idx],
+                    )
                     logged_examples.append(
                         _build_wandb_example(
                             images[sample_idx],
-                            cams[sample_idx],
+                            display_cam_tensor,
                             pred_masks[sample_idx],
                             masks[sample_idx],
                             image_paths[sample_idx],
                             target_class,
                             probs[sample_idx].item(),
                             batch_dice_scores[sample_idx],
+                            cam_label=display_cam_label,
                         )
                     )
     finally:
