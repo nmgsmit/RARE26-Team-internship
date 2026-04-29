@@ -131,6 +131,7 @@ def main(args):
     print(
         "Grad-CAM summary | "
         f"mAP consensus: {summary['gradcam/positive/mAP_consensus']:.4f} | "
+        f"Consensus mass: {summary['gradcam/positive/consensus_mass']:.4f} | "
         f"Expert mAP mean: {summary['gradcam/positive/mAP_expert_mean']:.4f} | "
         f"Dice AUC: {summary['gradcam/positive/dice_auc']:.4f} | "
         f"IoU AUC: {summary['gradcam/positive/iou_auc']:.4f} | "

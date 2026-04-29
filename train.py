@@ -447,6 +447,7 @@ def main(args):
         print(
             "Post-training Grad-CAM summary | "
             f"mAP consensus: {gradcam_result['summary_payload']['gradcam/positive/mAP_consensus']:.4f} | "
+            f"Consensus mass: {gradcam_result['summary_payload']['gradcam/positive/consensus_mass']:.4f} | "
             f"Expert mAP mean: {gradcam_result['summary_payload']['gradcam/positive/mAP_expert_mean']:.4f} | "
             f"Dice AUC: {gradcam_result['summary_payload']['gradcam/positive/dice_auc']:.4f} | "
             f"IoU AUC: {gradcam_result['summary_payload']['gradcam/positive/iou_auc']:.4f} | "

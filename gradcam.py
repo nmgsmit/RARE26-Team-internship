@@ -14,6 +14,9 @@ IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(3,
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(3, 1, 1)
 FLAT_CAM_STD_EPS = 1e-6
 NEAR_ZERO_CAM_MAX_EPS = 1e-6
+CONSENSUS_FILL_COLOR = np.asarray([0.0, 208.0, 255.0], dtype=np.float32)
+CONSENSUS_OUTER_OUTLINE_COLOR = np.asarray([0, 56, 80], dtype=np.uint8)
+CONSENSUS_INNER_OUTLINE_COLOR = np.asarray([255, 255, 255], dtype=np.uint8)
 
 
 def _forward_tokens_and_logits(model, images):
@@ -183,17 +186,38 @@ def _compute_mask_edge(mask):
     return mask & ~eroded
 
 
+def _dilate_mask(mask, radius=1):
+    mask = np.asarray(mask).astype(bool)
+    if radius <= 0 or not mask.any():
+        return mask.copy()
+
+    dilated = mask.copy()
+    for _ in range(radius):
+        expanded = dilated.copy()
+        expanded[1:, :] |= dilated[:-1, :]
+        expanded[:-1, :] |= dilated[1:, :]
+        expanded[:, 1:] |= dilated[:, :-1]
+        expanded[:, :-1] |= dilated[:, 1:]
+        expanded[1:, 1:] |= dilated[:-1, :-1]
+        expanded[1:, :-1] |= dilated[:-1, 1:]
+        expanded[:-1, 1:] |= dilated[1:, :-1]
+        expanded[:-1, :-1] |= dilated[1:, 1:]
+        dilated = expanded
+    return dilated
+
+
 def _overlay_soft_consensus(base_rgb, soft_mask_tensor, outline_threshold=0.5, max_alpha=0.55):
     soft_mask = np.clip(soft_mask_tensor.detach().cpu().numpy().astype(np.float32), 0.0, 1.0)
     alpha = (soft_mask[..., None] * max_alpha).astype(np.float32)
-    fill_color = np.asarray([255.0, 64.0, 64.0], dtype=np.float32)
 
-    overlay = (1.0 - alpha) * base_rgb.astype(np.float32) + alpha * fill_color.reshape(1, 1, 3)
+    overlay = (1.0 - alpha) * base_rgb.astype(np.float32) + alpha * CONSENSUS_FILL_COLOR.reshape(1, 1, 3)
     overlay = np.clip(np.rint(overlay), 0, 255).astype(np.uint8)
 
     outline_mask = _compute_mask_edge(soft_mask >= outline_threshold)
     if outline_mask.any():
-        overlay[outline_mask] = np.asarray([255, 255, 255], dtype=np.uint8)
+        outer_outline_mask = _dilate_mask(outline_mask, radius=1)
+        overlay[outer_outline_mask] = CONSENSUS_OUTER_OUTLINE_COLOR
+        overlay[outline_mask] = CONSENSUS_INNER_OUTLINE_COLOR
 
     return overlay
 
@@ -603,6 +627,9 @@ def evaluate_gradcam_barrett_dataset(
         f"{prefix}/overall/mean_soft_consensus_mass": _finite_mean(
             entry["soft_consensus_mass"] for entry in all_entries
         ),
+        f"{prefix}/overall/consensus_mass": _finite_mean(
+            entry["soft_consensus_mass"] for entry in all_entries
+        ),
         f"{prefix}/overall/mean_peak_hit_majority": _finite_mean(
             entry["peak_hit_majority"] for entry in all_entries
         ),
@@ -613,6 +640,9 @@ def evaluate_gradcam_barrett_dataset(
         f"{prefix}/positive/mAP_expert_mean": _finite_mean(entry["mean_expert_ap"] for entry in positive_entries),
         f"{prefix}/positive/mAP_expert_std_mean": _finite_mean(entry["expert_ap_std"] for entry in positive_entries),
         f"{prefix}/positive/soft_consensus_mass": _finite_mean(
+        entry["soft_consensus_mass"] for entry in positive_entries
+        ),
+        f"{prefix}/positive/consensus_mass": _finite_mean(
         entry["soft_consensus_mass"] for entry in positive_entries
         ),
         f"{prefix}/positive/peak_hit_union": _finite_mean(entry["peak_hit_union"] for entry in positive_entries),
@@ -672,8 +702,9 @@ def evaluate_gradcam_barrett_dataset(
                 target_class,
                 entry["target_prob"],
                 (
-                    f"AP={entry['ap_consensus']:.3f} | expertAP={entry['mean_expert_ap']:.3f} | "
-                    f"mass={entry['soft_consensus_mass']:.3f}"
+                    f"consensusAP={entry['ap_consensus']:.3f} | "
+                    f"expertAPMean={entry['mean_expert_ap']:.3f} | "
+                    f"consensusMass={entry['soft_consensus_mass']:.3f}"
                 ),
                 display_threshold=display_threshold,
                 cam_label=entry["display_cam_label"],
@@ -690,8 +721,9 @@ def evaluate_gradcam_barrett_dataset(
                 target_class,
                 entry["target_prob"],
                 (
-                    f"AP={entry['ap_consensus']:.3f} | expertAP={entry['mean_expert_ap']:.3f} | "
-                    f"mass={entry['soft_consensus_mass']:.3f}"
+                    f"consensusAP={entry['ap_consensus']:.3f} | "
+                    f"expertAPMean={entry['mean_expert_ap']:.3f} | "
+                    f"consensusMass={entry['soft_consensus_mass']:.3f}"
                 ),
                 display_threshold=display_threshold,
                 cam_label=entry["display_cam_label"],
@@ -738,8 +770,14 @@ def evaluate_gradcam_barrett_dataset(
         f"{prefix}/overall/mean_target_class_probability": summary_payload[
             f"{prefix}/overall/mean_target_class_probability"
         ],
-        f"{prefix}/overall/mean_soft_consensus_mass": summary_payload[
-            f"{prefix}/overall/mean_soft_consensus_mass"
+        f"{prefix}/overall/consensus_mass": summary_payload[
+            f"{prefix}/overall/consensus_mass"
+        ],
+        f"{prefix}/positive/consensus_mass": summary_payload[
+            f"{prefix}/positive/consensus_mass"
+        ],
+        f"{prefix}/positive/mAP_consensus": summary_payload[
+            f"{prefix}/positive/mAP_consensus"
         ],
         f"{prefix}/overall/mean_peak_hit_majority": summary_payload[
             f"{prefix}/overall/mean_peak_hit_majority"

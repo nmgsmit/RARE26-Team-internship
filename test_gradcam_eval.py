@@ -8,8 +8,10 @@ import torch
 
 from gradcam import (
     _compute_cam_activation_stats,
+    _overlay_soft_consensus,
     _select_display_cam_tensor,
     build_expert_consensus_masks,
+    compute_soft_mask_mass,
     compute_pixel_average_precision,
 )
 from testdata import build_barrett_gradcam_samples
@@ -89,6 +91,31 @@ class GradcamMetricTests(unittest.TestCase):
         self.assertEqual(label, "abs(signed cam)")
         self.assertAlmostEqual(float(display_cam.max().item()), 1.0, places=6)
         self.assertGreater(float(display_cam.std().item()), 0.0)
+
+    def test_soft_consensus_overlay_uses_high_contrast_fill_and_outline(self):
+        base_rgb = np.zeros((5, 5, 3), dtype=np.uint8)
+        soft_mask = torch.zeros((5, 5), dtype=torch.float32)
+        soft_mask[1:4, 1:4] = 1.0
+
+        overlay = _overlay_soft_consensus(base_rgb, soft_mask, outline_threshold=0.5, max_alpha=0.55)
+
+        self.assertTrue(np.array_equal(overlay[1, 1], np.array([255, 255, 255], dtype=np.uint8)))
+        self.assertGreater(int(overlay[2, 2, 2]), int(overlay[2, 2, 1]))
+        self.assertGreater(int(overlay[2, 2, 1]), int(overlay[2, 2, 0]))
+
+    def test_soft_consensus_mass_measures_fraction_of_cam_inside_consensus(self):
+        score_map = torch.tensor([
+            [1.0, 1.0],
+            [0.0, 0.0],
+        ], dtype=torch.float32)
+        soft_mask = torch.tensor([
+            [1.0, 0.5],
+            [0.0, 0.0],
+        ], dtype=torch.float32)
+
+        mass = compute_soft_mask_mass(score_map, soft_mask)
+
+        self.assertAlmostEqual(mass, 0.75, places=6)
 
 
 class BarrettGroupingTests(unittest.TestCase):
