@@ -91,7 +91,7 @@ def get_args_parser():
     parser.add_argument(
         "--gradcam-log-samples",
         type=int,
-        default=8,
+        default=10,
         help="Maximum number of qualitative Grad-CAM examples to log to W&B on evaluation epochs.",
     )
     parser.add_argument(
@@ -148,19 +148,19 @@ def get_args_parser():
     parser.add_argument(
         "--post-train-gradcam-log-best-k",
         type=int,
-        default=8,
+        default=10,
         help="Number of best positive Barrett Grad-CAM examples to log after training.",
     )
     parser.add_argument(
         "--post-train-gradcam-log-worst-k",
         type=int,
-        default=8,
+        default=10,
         help="Number of worst positive Barrett Grad-CAM examples to log after training.",
     )
     parser.add_argument(
         "--post-train-gradcam-log-hard-neg-k",
         type=int,
-        default=8,
+        default=10,
         help="Number of hard negative Barrett Grad-CAM examples to log after training.",
     )
     parser.set_defaults(gradcam_skip_empty_masks=True)

@@ -767,20 +767,11 @@ def evaluate_gradcam_barrett_dataset(
         ],
     }
     scalar_payload = {
-        f"{prefix}/overall/mean_target_class_probability": summary_payload[
-            f"{prefix}/overall/mean_target_class_probability"
-        ],
-        f"{prefix}/overall/consensus_mass": summary_payload[
-            f"{prefix}/overall/consensus_mass"
-        ],
         f"{prefix}/positive/consensus_mass": summary_payload[
             f"{prefix}/positive/consensus_mass"
         ],
         f"{prefix}/positive/mAP_consensus": summary_payload[
             f"{prefix}/positive/mAP_consensus"
-        ],
-        f"{prefix}/overall/mean_peak_hit_majority": summary_payload[
-            f"{prefix}/overall/mean_peak_hit_majority"
         ],
         f"{prefix}/overall/fraction_flat_or_near_zero_cams": summary_payload[
             f"{prefix}/overall/fraction_flat_or_near_zero_cams"

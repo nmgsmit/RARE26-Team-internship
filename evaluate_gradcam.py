@@ -42,12 +42,12 @@ def get_args_parser():
         default=0.5,
         help="Consensus-agreement threshold used for the white outline in qualitative Grad-CAM panels.",
     )
-    parser.add_argument("--log-best-k", type=int, default=8, help="Number of best positive examples to log.")
-    parser.add_argument("--log-worst-k", type=int, default=8, help="Number of worst positive examples to log.")
+    parser.add_argument("--log-best-k", type=int, default=10, help="Number of best positive examples to log.")
+    parser.add_argument("--log-worst-k", type=int, default=10, help="Number of worst positive examples to log.")
     parser.add_argument(
         "--log-hard-neg-k",
         type=int,
-        default=8,
+        default=10,
         help="Number of hard negative examples to log.",
     )
     parser.add_argument("--wandb-project", type=str, default="RARE25-Project", help="Weights & Biases project name.")
