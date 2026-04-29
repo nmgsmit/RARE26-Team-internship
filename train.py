@@ -226,6 +226,7 @@ def main(args):
 
     criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr)
+    # Keep this at 0.01 if you want the same projected 1% validation/test metrics as test-model.
     projected_prevalence = 0.01
 
     # TRAINING LOOP --------------------------------------------------------------------------------------------------------
@@ -289,6 +290,8 @@ def main(args):
             )
         avg_valid_loss = valid_loss / valid_total
         valid_accuracy = valid_correct / valid_total
+        # Threshold selection happens here: we choose it on the full validation split once per epoch,
+        # then reuse that exact threshold for validation/test reporting and the projected 1% metrics.
         valid_metrics = compute_group_eval_metrics(valid_targets, valid_scores)
         valid_threshold = valid_metrics["Threshold"]
         valid_projected_metrics = project_operating_metrics_to_prevalence(
@@ -338,6 +341,7 @@ def main(args):
             f"1%Test FP/1000: {test_projected_metrics['Projected FP per 1000']:.2f}"
             f"{gradcam_summary}"
         )
+        # Keep the same metric dictionaries and namespaces here if you want W&B logging to stay aligned with test-model.
         log_metrics(
             epoch,
             optimizer,
@@ -374,6 +378,7 @@ def main(args):
                 and np.isclose(current_valid_projected_ppv, best_valid_projected_ppv)
             )
         )
+        # Best-checkpoint selection lives here: maximize projected 1% validation PPV and break ties with lower validation FPR.
         is_better_checkpoint = (
             current_valid_projected_ppv > best_valid_projected_ppv
             or (same_projected_ppv and current_valid_fpr < best_valid_fpr)

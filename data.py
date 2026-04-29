@@ -75,6 +75,8 @@ def prepare_datasets(args, device):
         stratify=df['stratify_col'], 
         random_state=42
     )
+    # Keep validation on the raw stratified split. The 1% setting is projected later in metrics/train,
+    # so changing val_df here will also change threshold selection, W&B logging, and checkpoint ranking.
 
     # 4. Create Datasets and Loaders
     train_ds = SimpleDataset(train_df, transform)

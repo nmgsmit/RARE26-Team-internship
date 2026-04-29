@@ -32,6 +32,8 @@ def compute_ppv_at_recall_target(y_true, y_score, recall_target=0.90):
     return float(precision[idx[-1]])
 
 
+# train.py uses this threshold to define the epoch operating point. Changing it changes both the
+# logged validation/test metrics and the best-checkpoint policy.
 def select_highest_threshold_for_target_recall(y_true, y_score, recall_target=0.90):
     y_true, y_score = _to_numpy(y_true, y_score)
     if len(y_true) == 0:
@@ -105,6 +107,8 @@ def compute_operating_metrics(y_true, y_score, threshold):
     return metrics
 
 
+# This is the only place where the 1% deployment assumption is applied. Keep train.py at
+# prevalence=0.01 if you want identical projected metrics, W&B curves, and checkpoint ranking.
 def project_operating_metrics_to_prevalence(metrics, prevalence=0.01, population_size=1000):
     prevalence = float(prevalence)
     population_size = float(population_size)
@@ -271,6 +275,7 @@ def log_metrics(
     extra_payload=None,
 ):
     learning_rate = optimizer.param_groups[0]["lr"]
+    # Keep these keys stable if you want W&B dashboards from main and test-model to stay directly comparable.
     payload = OrderedDict([
         ("epoch", epoch + 1),
         ("learning_rate", learning_rate),
