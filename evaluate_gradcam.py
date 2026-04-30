@@ -5,7 +5,7 @@ import torch
 import wandb
 
 from gradcam import evaluate_gradcam_barrett_dataset
-from model import Model, load_model_checkpoint
+from model import Model, load_model_checkpoint, resolve_model_kwargs_from_checkpoint
 from testdata import load_barrett_gradcam_dataset
 
 
@@ -67,7 +67,7 @@ def get_args_parser():
         "--backbone-name",
         type=str,
         default="vit_base_patch16_dinov3.lvd1689m",
-        help="Backbone architecture used to create the model before loading the checkpoint.",
+        help="Fallback backbone architecture used only when the checkpoint does not store model_config metadata.",
     )
     return parser
 
@@ -83,12 +83,36 @@ def main(args):
         config=vars(args),
     )
 
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    if (
+        isinstance(checkpoint, dict)
+        and isinstance(checkpoint.get("backbone"), dict)
+        and isinstance(checkpoint.get("proj_head"), dict)
+        and "model_state_dict" not in checkpoint
+    ):
+        raise ValueError(
+            "The supplied checkpoint only contains pretrain encoder weights. "
+            "Grad-CAM evaluation needs a baseline or finetuned full-model checkpoint."
+        )
+
+    resolved_model_kwargs = resolve_model_kwargs_from_checkpoint(
+        checkpoint,
+        fallback_kwargs={
+            "in_channels": 3,
+            "n_classes": 2,
+            "backbone_name": args.backbone_name,
+            "input_size": args.input_size,
+            "pretrained": False,
+        },
+    )
+    effective_input_size = int(resolved_model_kwargs.get("input_size", args.input_size))
+
     loader, _, _, dataset_qa = load_barrett_gradcam_dataset(
         dataset_root=args.dataset_root,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         device=device,
-        input_size=args.input_size,
+        input_size=effective_input_size,
     )
     print(
         f"Loaded Barrett Grad-CAM dataset from {args.dataset_root} "
@@ -97,15 +121,13 @@ def main(args):
         f"{dataset_qa['negative_image_count']} negatives)"
     )
 
-    model = Model(
-        in_channels=3,
-        n_classes=2,
-        backbone_name=args.backbone_name,
-        input_size=args.input_size,
-        pretrained=False,
-    ).to(device)
-    load_model_checkpoint(model, checkpoint_path)
+    model = Model(**resolved_model_kwargs).to(device)
+    load_model_checkpoint(model, checkpoint_path, map_location=device)
     print(f"Loaded checkpoint from {checkpoint_path}")
+    print(
+        f"Resolved model for Grad-CAM | backbone: {resolved_model_kwargs['backbone_name']} | "
+        f"input size: {effective_input_size} | head: {resolved_model_kwargs.get('head_type', 'unknown')}"
+    )
 
     result = evaluate_gradcam_barrett_dataset(
         model=model,
