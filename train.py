@@ -89,6 +89,18 @@ def get_args_parser():
     parser.add_argument("--experiment-id", type=str, default="rare25-run")
     parser.add_argument("--save-dir", type=str, default="./checkpoints")
     parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default="RARE25-Project",
+        help="Weights & Biases project used for training runs.",
+    )
+    parser.add_argument(
+        "--wandb-group",
+        type=str,
+        default=None,
+        help="Optional Weights & Biases group for collecting related runs.",
+    )
+    parser.add_argument(
         "--head-type",
         type=str,
         default="mlp_fullwidth",
@@ -511,7 +523,12 @@ def configure_stage(model, args):
 
 def main(args):
     args = resolve_runtime_config(args)
-    wandb.init(project="RARE25-Project", name=args.experiment_id, config=vars(args))
+    wandb.init(
+        project=args.wandb_project,
+        group=args.wandb_group,
+        name=args.experiment_id,
+        config=vars(args),
+    )
 
     os.makedirs(args.save_dir, exist_ok=True)
     torch.manual_seed(args.seed)
