@@ -9,8 +9,9 @@ import torch.nn.functional as F
 import wandb
 from torch.optim import AdamW, SGD
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, SequentialLR
+from torch.utils.data import DataLoader, TensorDataset
 
-from data import prepare_datasets
+from data import SimpleDataset, build_eval_transform, prepare_datasets
 from gradcam import evaluate_gradcam_barrett_dataset, evaluate_gradcam_segmentation_dataset
 from metrics import (
     collect_scores,
@@ -61,6 +62,13 @@ HEAD_TYPE_CHOICES = (
 )
 
 
+def sampling_strategy_arg(value):
+    try:
+        return float(value)
+    except ValueError:
+        return value
+
+
 def get_args_parser():
     parser = ArgumentParser("RARE25 configurable staged training")
     parser.add_argument(
@@ -79,6 +87,52 @@ def get_args_parser():
     parser.add_argument("--method", type=str, default=None, help=SUPPRESS)
     parser.add_argument("--encoder-ckpt", type=str, default=None)
     parser.add_argument("--warmup-epochs", type=int, default=3)
+    parser.add_argument(
+        "--finetune-with-smote",
+        action="store_true",
+        help="Train the finetune-stage classifier head on frozen backbone embeddings augmented with SMOTE.",
+    )
+    parser.add_argument("--smote-neighbors", type=int, default=5)
+    parser.add_argument(
+        "--smote-sampling-strategy",
+        type=sampling_strategy_arg,
+        default="minority",
+        help="SMOTE sampling strategy passed to imbalanced-learn, e.g. minority, auto, or a float ratio.",
+    )
+    parser.add_argument(
+        "--smote-synthetic-ratio",
+        type=float,
+        default=None,
+        help="Optional target synthetic-to-real sample ratio for minority oversampling.",
+    )
+    parser.add_argument(
+        "--smote-energy-filter",
+        action="store_true",
+        help="Enable energy-based filtering of draft SMOTE embeddings before head training.",
+    )
+    parser.add_argument(
+        "--smote-energy-refine-steps",
+        type=int,
+        default=0,
+        help="Number of gradient-based refinement steps applied to accepted SMOTE embeddings.",
+    )
+    parser.add_argument(
+        "--smote-energy-refine-step-size",
+        type=float,
+        default=0.05,
+        help="Step size for each SMOTE energy refinement update.",
+    )
+    parser.add_argument("--smote-energy-epochs", type=int, default=25)
+    parser.add_argument("--smote-energy-lr", type=float, default=1e-3)
+    parser.add_argument("--smote-energy-weight-decay", type=float, default=1e-4)
+    parser.add_argument("--smote-energy-batch-size", type=int, default=256)
+    parser.add_argument("--smote-energy-hidden-dim", type=int, default=256)
+    parser.add_argument("--smote-energy-layers", type=int, default=2)
+    parser.add_argument("--smote-energy-dropout", type=float, default=0.1)
+    parser.add_argument("--smote-energy-threshold-quantile", type=float, default=0.95)
+    parser.add_argument("--smote-energy-noise-std", type=float, default=0.15)
+    parser.add_argument("--smote-energy-noise-copies", type=int, default=2)
+    parser.add_argument("--smote-energy-majority-ratio", type=float, default=1.0)
 
     parser.add_argument("--data-dir", type=str, default="./data")
     parser.add_argument("--batch-size", type=int, default=32)
@@ -287,6 +341,20 @@ def resolve_runtime_config(args):
             "Baseline and finetune stages only support supervised losses. "
             "Use --loss-name ce or --loss-name class-balanced."
         )
+    if args.finetune_with_smote and args.stage != "finetune":
+        raise ValueError("--finetune-with-smote is only supported with --stage finetune.")
+    if (args.smote_energy_filter or args.smote_energy_refine_steps > 0) and not args.finetune_with_smote:
+        raise ValueError(
+            "SMOTE energy filtering/refinement requires --finetune-with-smote."
+        )
+    if args.smote_energy_refine_steps < 0:
+        raise ValueError(
+            f"--smote-energy-refine-steps must be >= 0, got {args.smote_energy_refine_steps}."
+        )
+    if args.smote_synthetic_ratio is not None and args.smote_synthetic_ratio <= 0.0:
+        raise ValueError(
+            f"--smote-synthetic-ratio must be positive when provided, got {args.smote_synthetic_ratio}."
+        )
 
     if args.head_hidden_dim is not None and args.head_hidden_dim <= 0:
         raise ValueError(f"--head-hidden-dim must be > 0, got {args.head_hidden_dim}.")
@@ -451,20 +519,338 @@ def run_post_training_gradcam(args, model, device, final_save_path, best_save_pa
     )
 
 
-def build_supervised_criterion(loss_name, train_ds, n_classes, device):
+class EnergyMLP(nn.Module):
+    def __init__(self, input_dim, hidden_dim=256, hidden_layers=2, dropout=0.1):
+        super().__init__()
+        if hidden_dim <= 0:
+            raise ValueError(f"EnergyMLP hidden_dim must be positive, got {hidden_dim}.")
+        if hidden_layers <= 0:
+            raise ValueError(f"EnergyMLP hidden_layers must be positive, got {hidden_layers}.")
+        if not 0.0 <= dropout < 1.0:
+            raise ValueError(f"EnergyMLP dropout must be in [0, 1), got {dropout}.")
+
+        layers = []
+        in_features = int(input_dim)
+        for _ in range(int(hidden_layers)):
+            layers.append(nn.Linear(in_features, int(hidden_dim)))
+            layers.append(nn.ReLU())
+            if dropout > 0.0:
+                layers.append(nn.Dropout(float(dropout)))
+            in_features = int(hidden_dim)
+        layers.append(nn.Linear(in_features, 1))
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.network(x).squeeze(-1)
+
+
+def sample_rows_with_replacement(rng, X, sample_count):
+    if sample_count <= 0:
+        return np.empty((0, X.shape[1]), dtype=np.float32)
+    replace = len(X) < sample_count
+    indices = rng.choice(len(X), size=sample_count, replace=replace)
+    return X[indices].astype(np.float32)
+
+
+def make_tensor_only_loader(features, batch_size, shuffle=False):
+    features_tensor = torch.tensor(features, dtype=torch.float32)
+    return DataLoader(TensorDataset(features_tensor), batch_size=batch_size, shuffle=shuffle)
+
+
+def make_feature_loader(features, labels, args, shuffle):
+    return DataLoader(
+        TensorDataset(
+            torch.tensor(features, dtype=torch.float32),
+            torch.tensor(labels, dtype=torch.long),
+        ),
+        batch_size=args.batch_size,
+        shuffle=shuffle,
+    )
+
+
+def score_energy_model(energy_model, features, args, device):
+    if len(features) == 0:
+        return np.empty(0, dtype=np.float32)
+
+    energy_model.eval()
+    energies = []
+    loader = make_tensor_only_loader(features, batch_size=args.smote_energy_batch_size, shuffle=False)
+    with torch.no_grad():
+        for (batch_features,) in loader:
+            batch_energy = energy_model(batch_features.to(device))
+            energies.append(batch_energy.detach().cpu().numpy())
+    return np.concatenate(energies, axis=0).astype(np.float32)
+
+
+def build_energy_negatives(features, labels, args):
+    class_counts = np.bincount(labels, minlength=2)
+    minority_class = int(np.argmin(class_counts))
+    minority = features[labels == minority_class].astype(np.float32)
+    majority = features[labels != minority_class].astype(np.float32)
+
+    if len(minority) == 0 or len(majority) == 0:
+        raise ValueError("Energy-based SMOTE filtering requires both classes in the train split.")
+
+    rng = np.random.default_rng(args.seed)
+    majority_target = max(1, int(round(float(args.smote_energy_majority_ratio) * len(minority))))
+    negative_parts = [sample_rows_with_replacement(rng, majority, majority_target)]
+
+    noise_copies = max(0, int(args.smote_energy_noise_copies))
+    if noise_copies > 0:
+        base = np.repeat(minority, noise_copies, axis=0)
+        noise = rng.normal(0.0, float(args.smote_energy_noise_std), size=base.shape).astype(np.float32)
+        negative_parts.append((base + noise).astype(np.float32))
+
+    negatives = np.concatenate(negative_parts, axis=0).astype(np.float32)
+    return minority, negatives, minority_class
+
+
+def train_smote_energy_model(features, labels, args, device):
+    positives, negatives, minority_class = build_energy_negatives(features, labels, args)
+    energy_features = np.concatenate([positives, negatives], axis=0).astype(np.float32)
+    energy_labels = np.concatenate(
+        [
+            np.ones(len(positives), dtype=np.float32),
+            np.zeros(len(negatives), dtype=np.float32),
+        ],
+        axis=0,
+    )
+
+    rng = np.random.default_rng(args.seed)
+    permutation = rng.permutation(len(energy_features))
+    energy_features = energy_features[permutation]
+    energy_labels = energy_labels[permutation]
+
+    energy_model = EnergyMLP(
+        input_dim=features.shape[1],
+        hidden_dim=args.smote_energy_hidden_dim,
+        hidden_layers=args.smote_energy_layers,
+        dropout=args.smote_energy_dropout,
+    ).to(device)
+    optimizer = AdamW(
+        energy_model.parameters(),
+        lr=args.smote_energy_lr,
+        weight_decay=args.smote_energy_weight_decay,
+    )
+    criterion = nn.BCEWithLogitsLoss()
+    loader = DataLoader(
+        TensorDataset(
+            torch.tensor(energy_features, dtype=torch.float32),
+            torch.tensor(energy_labels, dtype=torch.float32),
+        ),
+        batch_size=args.smote_energy_batch_size,
+        shuffle=True,
+    )
+
+    final_loss = 0.0
+    for _ in range(max(1, int(args.smote_energy_epochs))):
+        energy_model.train()
+        epoch_loss = 0.0
+        epoch_total = 0
+        for batch_features, batch_targets in loader:
+            batch_features = batch_features.to(device)
+            batch_targets = batch_targets.to(device)
+
+            optimizer.zero_grad()
+            logits = -energy_model(batch_features)
+            loss = criterion(logits, batch_targets)
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item() * batch_features.size(0)
+            epoch_total += batch_features.size(0)
+        final_loss = epoch_loss / max(1, epoch_total)
+
+    real_energies = score_energy_model(energy_model, positives, args, device)
+    majority_energies = score_energy_model(energy_model, features[labels != minority_class], args, device)
+    threshold = float(np.quantile(real_energies, float(args.smote_energy_threshold_quantile)))
+    stats = {
+        "minority_class": minority_class,
+        "energy_train_loss": float(final_loss),
+        "energy_threshold": threshold,
+        "real_energy_mean": float(real_energies.mean()),
+        "real_energy_std": float(real_energies.std()),
+        "real_energy_p95": float(np.quantile(real_energies, 0.95)),
+        "majority_energy_mean": float(majority_energies.mean()),
+        "majority_energy_std": float(majority_energies.std()),
+    }
+    return energy_model, stats
+
+
+def refine_synthetic_embeddings(energy_model, features, args, device):
+    if len(features) == 0 or int(args.smote_energy_refine_steps) <= 0:
+        return features.astype(np.float32)
+
+    refined = []
+    energy_model.eval()
+    loader = make_tensor_only_loader(features, batch_size=args.smote_energy_batch_size, shuffle=False)
+    step_size = float(args.smote_energy_refine_step_size)
+
+    for (batch_features,) in loader:
+        z = batch_features.to(device)
+        for _ in range(int(args.smote_energy_refine_steps)):
+            z = z.detach().requires_grad_(True)
+            energy = energy_model(z).sum()
+            gradient = torch.autograd.grad(energy, z)[0]
+            with torch.no_grad():
+                z = z - step_size * gradient
+        refined.append(z.detach().cpu().numpy())
+
+    return np.concatenate(refined, axis=0).astype(np.float32)
+
+
+def build_smote_variant_name(args):
+    filter_enabled = bool(args.smote_energy_filter)
+    refine_enabled = int(args.smote_energy_refine_steps) > 0
+    if filter_enabled and refine_enabled:
+        return "smote_filter_refine"
+    if filter_enabled:
+        return "smote_filter"
+    if refine_enabled:
+        return "smote_refine"
+    return "smote"
+
+
+def fit_smote_resampler(features, labels, args, device):
+    try:
+        from imblearn.over_sampling import SMOTE
+    except ImportError as exc:
+        raise ImportError(
+            "SMOTE finetuning requires imbalanced-learn. Install the branch requirements with "
+            "`pip install -r requirements.txt`."
+        ) from exc
+
+    class_counts = np.bincount(labels, minlength=2)
+    if np.any(class_counts == 0):
+        raise ValueError(f"SMOTE requires both classes in the train split, got {class_counts.tolist()}.")
+
+    minority_count = int(np.min(class_counts))
+    if minority_count < 2:
+        raise ValueError(f"SMOTE needs at least two minority samples, got {class_counts.tolist()}.")
+
+    requested_neighbors = int(args.smote_neighbors)
+    n_neighbors = min(requested_neighbors, minority_count - 1)
+    if n_neighbors != requested_neighbors:
+        print(
+            f"Reduced SMOTE k_neighbors from {requested_neighbors} to {n_neighbors} "
+            f"because the minority class has {minority_count} samples."
+        )
+
+    sampling_strategy = args.smote_sampling_strategy
+    if args.smote_synthetic_ratio is not None:
+        minority_class = int(np.argmin(class_counts))
+        synthetic_count = int(round(float(args.smote_synthetic_ratio) * len(labels)))
+        target_count = int(class_counts[minority_class] + synthetic_count)
+        sampling_strategy = {minority_class: target_count}
+        print(
+            "Using SMOTE synthetic-to-real ratio target: "
+            f"{args.smote_synthetic_ratio} -> target class {minority_class} count {target_count}."
+        )
+
+    sampler = SMOTE(
+        k_neighbors=n_neighbors,
+        random_state=args.seed,
+        sampling_strategy=sampling_strategy,
+    )
+    resampled_features, resampled_labels = sampler.fit_resample(features, labels)
+    resampled_features = resampled_features.astype(np.float32)
+    resampled_labels = resampled_labels.astype(int)
+
+    synthetic_total = int(len(resampled_features) - len(features))
+    synthetic_features = resampled_features[len(features):].astype(np.float32)
+    accepted_synthetic = synthetic_features
+    diagnostics = {
+        "variant": build_smote_variant_name(args),
+        "draft_total": synthetic_total,
+        "accepted_total": synthetic_total,
+        "rejected_total": 0,
+        "accepted_ratio": 1.0 if synthetic_total > 0 else 0.0,
+        "filter_enabled": int(bool(args.smote_energy_filter)),
+        "refine_enabled": int(int(args.smote_energy_refine_steps) > 0),
+        "refine_steps": int(args.smote_energy_refine_steps),
+        "energy_model_trained": 0,
+        "energy_train_loss": 0.0,
+        "energy_threshold": 0.0,
+        "real_energy_mean": 0.0,
+        "real_energy_std": 0.0,
+        "real_energy_p95": 0.0,
+        "majority_energy_mean": 0.0,
+        "majority_energy_std": 0.0,
+        "draft_energy_mean": 0.0,
+        "draft_energy_std": 0.0,
+        "accepted_energy_mean": 0.0,
+        "accepted_energy_std": 0.0,
+        "refined_energy_mean": 0.0,
+        "refined_energy_std": 0.0,
+    }
+
+    if synthetic_total == 0:
+        return resampled_features, resampled_labels, diagnostics
+
+    if args.smote_energy_filter or int(args.smote_energy_refine_steps) > 0:
+        energy_model, energy_stats = train_smote_energy_model(features, labels, args, device)
+        diagnostics.update(energy_stats)
+        diagnostics["energy_model_trained"] = 1
+
+        draft_energies = score_energy_model(energy_model, synthetic_features, args, device)
+        diagnostics["draft_energy_mean"] = float(draft_energies.mean())
+        diagnostics["draft_energy_std"] = float(draft_energies.std())
+
+        if args.smote_energy_filter:
+            keep_mask = draft_energies <= diagnostics["energy_threshold"]
+            accepted_synthetic = synthetic_features[keep_mask].astype(np.float32)
+            accepted_energies = draft_energies[keep_mask]
+            diagnostics["accepted_total"] = int(keep_mask.sum())
+            diagnostics["rejected_total"] = int((~keep_mask).sum())
+            diagnostics["accepted_ratio"] = diagnostics["accepted_total"] / max(1, synthetic_total)
+            if accepted_energies.size > 0:
+                diagnostics["accepted_energy_mean"] = float(accepted_energies.mean())
+                diagnostics["accepted_energy_std"] = float(accepted_energies.std())
+        else:
+            diagnostics["accepted_energy_mean"] = diagnostics["draft_energy_mean"]
+            diagnostics["accepted_energy_std"] = diagnostics["draft_energy_std"]
+
+        if int(args.smote_energy_refine_steps) > 0 and len(accepted_synthetic) > 0:
+            accepted_synthetic = refine_synthetic_embeddings(energy_model, accepted_synthetic, args, device)
+            refined_energies = score_energy_model(energy_model, accepted_synthetic, args, device)
+            diagnostics["refined_energy_mean"] = float(refined_energies.mean())
+            diagnostics["refined_energy_std"] = float(refined_energies.std())
+
+    minority_class = int(np.argmin(class_counts))
+    final_features = np.concatenate([features, accepted_synthetic], axis=0).astype(np.float32)
+    final_labels = np.concatenate(
+        [
+            labels.astype(int),
+            np.full(len(accepted_synthetic), minority_class, dtype=int),
+        ],
+        axis=0,
+    )
+    return final_features, final_labels, diagnostics
+
+
+def build_supervised_criterion_from_labels(loss_name, labels, n_classes, device):
     if loss_name == "ce":
         print("Using standard cross entropy.")
         return nn.CrossEntropyLoss()
 
-    train_labels = torch.tensor(train_ds.df["label"].tolist(), dtype=torch.long)
-    class_counts = torch.bincount(train_labels, minlength=n_classes).float()
+    label_tensor = torch.tensor(labels, dtype=torch.long)
+    class_counts = torch.bincount(label_tensor, minlength=n_classes).float()
     if torch.any(class_counts == 0):
-        raise ValueError(f"At least one class has zero training samples: {class_counts.tolist()}")
+        raise ValueError(f"At least one class has zero samples: {class_counts.tolist()}")
 
     class_weights = class_counts.sum() / (n_classes * class_counts)
     class_weights = class_weights.to(device)
     print(f"Using class-balanced cross entropy with weights: {class_weights.tolist()}")
     return nn.CrossEntropyLoss(weight=class_weights)
+
+
+def build_supervised_criterion(loss_name, train_ds, n_classes, device):
+    return build_supervised_criterion_from_labels(
+        loss_name,
+        train_ds.df["label"].tolist(),
+        n_classes,
+        device,
+    )
 
 
 def configure_stage(model, args):
@@ -519,6 +905,248 @@ def configure_stage(model, args):
         return optimizer, scheduler
 
     raise ValueError(f"Unknown stage: {args.stage}")
+
+
+def extract_dataset_embeddings(model, dataset, args, device):
+    loader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+    )
+    features = []
+    labels = []
+    model.eval()
+    with torch.no_grad():
+        for images, batch_labels in loader:
+            batch_features = model.encode(images.to(device))
+            features.append(batch_features.detach().cpu().numpy())
+            labels.append(batch_labels.numpy())
+    return np.concatenate(features, axis=0).astype(np.float32), np.concatenate(labels, axis=0).astype(int)
+
+
+def run_smote_finetune(
+    args,
+    model,
+    train_ds,
+    valid_loader,
+    testset_loader,
+    class_names,
+    device,
+    checkpoint_model_config,
+    best_save_path,
+    final_save_path,
+):
+    if not args.encoder_ckpt:
+        raise ValueError("--encoder-ckpt is required for finetune stage")
+
+    load_encoder_checkpoint(model, args.encoder_ckpt)
+    print(f"Loaded encoder checkpoint from {args.encoder_ckpt}")
+
+    for parameter in model.backbone.parameters():
+        parameter.requires_grad = False
+    for parameter in model.proj_head.parameters():
+        parameter.requires_grad = False
+    for parameter in model.cls_head.parameters():
+        parameter.requires_grad = True
+
+    eval_train_ds = SimpleDataset(train_ds.df, build_eval_transform(args.input_size))
+    train_features, train_labels = extract_dataset_embeddings(model, eval_train_ds, args, device)
+    print(
+        "Extracted frozen train embeddings for SMOTE finetune | "
+        f"samples={len(train_labels)} | class0={(train_labels == 0).sum()} | class1={(train_labels == 1).sum()}"
+    )
+
+    resampled_features, resampled_labels, smote_diagnostics = fit_smote_resampler(
+        train_features,
+        train_labels,
+        args,
+        device,
+    )
+    print(
+        "SMOTE diagnostics | "
+        f"variant={smote_diagnostics['variant']} | "
+        f"draft={smote_diagnostics['draft_total']} | "
+        f"accepted={smote_diagnostics['accepted_total']} | "
+        f"rejected={smote_diagnostics['rejected_total']}"
+    )
+
+    criterion = build_supervised_criterion_from_labels(
+        args.loss_name,
+        resampled_labels.tolist(),
+        len(class_names),
+        device,
+    )
+    feature_loader = make_feature_loader(resampled_features, resampled_labels, args, shuffle=True)
+    optimizer = AdamW(model.cls_head.parameters(), lr=args.lr)
+    scheduler = build_finetune_scheduler(optimizer, args.epochs)
+
+    projected_prevalence = 0.01
+    best_valid_projected_ppv = float("-inf")
+    best_valid_fpr = float("inf")
+    smote_payload = {f"smote/{key}": value for key, value in smote_diagnostics.items()}
+
+    for epoch in range(args.epochs):
+        model.train()
+        train_loss = 0.0
+        train_correct = 0
+        train_total = 0
+
+        for batch_features, batch_labels in feature_loader:
+            batch_features = batch_features.to(device)
+            batch_labels = batch_labels.to(device)
+
+            optimizer.zero_grad()
+            logits = model.classify(batch_features)
+            loss = criterion(logits, batch_labels)
+            loss.backward()
+            optimizer.step()
+
+            batch_size = batch_labels.size(0)
+            train_loss += loss.item() * batch_size
+            train_correct += (torch.argmax(logits, dim=1) == batch_labels).sum().item()
+            train_total += batch_size
+
+        scheduler.step()
+
+        avg_train_loss = train_loss / max(1, train_total)
+        train_accuracy = train_correct / max(1, train_total)
+
+        model.eval()
+        valid_loss = 0.0
+        valid_correct = 0
+        valid_total = 0
+        valid_scores = []
+        valid_targets = []
+
+        with torch.no_grad():
+            for images, labels in valid_loader:
+                images = images.to(device)
+                labels = labels.to(device)
+                outputs = model(images)
+                loss = criterion(outputs, labels)
+
+                batch_size = labels.size(0)
+                valid_loss += loss.item() * batch_size
+                valid_correct += (torch.argmax(outputs, dim=1) == labels).sum().item()
+                valid_total += batch_size
+                valid_scores.extend(torch.softmax(outputs, dim=1)[:, 1].detach().cpu().tolist())
+                valid_targets.extend(labels.detach().cpu().tolist())
+
+        avg_valid_loss = valid_loss / max(1, valid_total)
+        valid_accuracy = valid_correct / max(1, valid_total)
+        valid_metrics = compute_group_eval_metrics(valid_targets, valid_scores)
+        valid_threshold = valid_metrics["Threshold"]
+        valid_projected_metrics = project_operating_metrics_to_prevalence(
+            valid_metrics,
+            prevalence=projected_prevalence,
+        )
+
+        test_targets, test_scores = collect_scores(model, testset_loader, device)
+        test_metrics = compute_group_eval_metrics(test_targets, test_scores, threshold=valid_threshold)
+        test_projected_metrics = project_operating_metrics_to_prevalence(
+            test_metrics,
+            prevalence=projected_prevalence,
+        )
+
+        print(
+            f"Epoch {epoch + 1:02d}/{args.epochs} | "
+            f"SMOTE Train Loss: {avg_train_loss:.4f} | Train Acc: {train_accuracy:.4f} | "
+            f"Val Loss: {avg_valid_loss:.4f} | Val Acc: {valid_accuracy:.4f} | "
+            f"Val AUPRC: {valid_metrics['AUPRC']:.4f} | Val AUROC: {valid_metrics['AUROC']:.4f} | "
+            f"Val PPV@90R: {valid_metrics['PPV@90RECALL']:.4f} | Val Thr: {valid_threshold:.4f} | "
+            f"Val TPR: {valid_metrics['TPR']:.4f} | Val FPR: {valid_metrics['FPR']:.4f} | "
+            f"1%Val PPV: {valid_projected_metrics['Projected PPV']:.4f} | "
+            f"Test AUPRC: {test_metrics['AUPRC']:.4f} | Test AUROC: {test_metrics['AUROC']:.4f}"
+        )
+
+        log_metrics(
+            epoch,
+            optimizer,
+            avg_train_loss,
+            train_accuracy,
+            avg_valid_loss,
+            valid_accuracy,
+            valid_metrics,
+            test_metrics,
+            valid_projected_metrics,
+            test_projected_metrics,
+            extra_payload={
+                "stage": args.stage,
+                "loss_name": args.loss_name,
+                "train/accuracy": train_accuracy,
+                "valid/accuracy": valid_accuracy,
+                **smote_payload,
+            },
+        )
+
+        current_valid_projected_ppv = (
+            valid_projected_metrics["Projected PPV"]
+            if np.isfinite(valid_projected_metrics["Projected PPV"])
+            else float("-inf")
+        )
+        current_valid_fpr = (
+            valid_projected_metrics["FPR"]
+            if np.isfinite(valid_projected_metrics["FPR"])
+            else float("inf")
+        )
+        same_projected_ppv = (
+            (
+                not np.isfinite(current_valid_projected_ppv)
+                and not np.isfinite(best_valid_projected_ppv)
+            )
+            or (
+                np.isfinite(current_valid_projected_ppv)
+                and np.isfinite(best_valid_projected_ppv)
+                and np.isclose(current_valid_projected_ppv, best_valid_projected_ppv)
+            )
+        )
+        is_better_checkpoint = (
+            current_valid_projected_ppv > best_valid_projected_ppv
+            or (same_projected_ppv and current_valid_fpr < best_valid_fpr)
+        )
+
+        if is_better_checkpoint:
+            best_valid_projected_ppv = current_valid_projected_ppv
+            best_valid_fpr = current_valid_fpr
+            torch.save(
+                create_model_checkpoint(
+                    model,
+                    checkpoint_model_config,
+                    extra_metadata={
+                        "experiment_id": args.experiment_id,
+                        "epoch": epoch + 1,
+                        "selected_threshold": valid_threshold,
+                        "stage": args.stage,
+                        "loss_name": args.loss_name,
+                        "finetune_with_smote": True,
+                        "smote_diagnostics": smote_diagnostics,
+                    },
+                ),
+                best_save_path,
+            )
+            print(
+                f"   -> Saved new best model to {best_save_path} "
+                f"(1% PPV: {valid_projected_metrics['Projected PPV']:.4f}, "
+                f"FPR: {valid_metrics['FPR']:.4f}, Threshold: {valid_threshold:.4f})"
+            )
+
+    torch.save(
+        create_model_checkpoint(
+            model,
+            checkpoint_model_config,
+            extra_metadata={
+                "experiment_id": args.experiment_id,
+                "epoch": args.epochs,
+                "stage": args.stage,
+                "loss_name": args.loss_name,
+                "finetune_with_smote": True,
+                "smote_diagnostics": smote_diagnostics,
+            },
+        ),
+        final_save_path,
+    )
+    print(f"Saved final model: {final_save_path}")
 
 
 def main(args):
@@ -618,6 +1246,32 @@ def main(args):
         "mlp_hidden_dim": args.mlp_hidden_dim,
         "mlp_dropout": args.mlp_dropout,
     }
+
+    if args.stage == "finetune" and args.finetune_with_smote:
+        run_smote_finetune(
+            args=args,
+            model=model,
+            train_ds=train_ds,
+            valid_loader=valid_loader,
+            testset_loader=testset_loader,
+            class_names=class_names,
+            device=device,
+            checkpoint_model_config=checkpoint_model_config,
+            best_save_path=os.path.join(args.save_dir, f"{args.experiment_id}_best.pt"),
+            final_save_path=os.path.join(args.save_dir, f"{args.experiment_id}_final.pt"),
+        )
+        if args.post_train_gradcam:
+            run_post_training_gradcam(
+                args=args,
+                model=model,
+                device=device,
+                final_save_path=os.path.join(args.save_dir, f"{args.experiment_id}_final.pt"),
+                best_save_path=os.path.join(args.save_dir, f"{args.experiment_id}_best.pt"),
+            )
+        print(f"Class mapping: {class_names}")
+        print("Training finished! Check your WandB dashboard.")
+        wandb.finish()
+        return
 
     criterion = None
     if args.stage != "pretrain":

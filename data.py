@@ -51,6 +51,15 @@ class SimpleDataset(Dataset):
         return self.transform(image), label
 
 
+def build_eval_transform(input_size):
+    return Compose([
+        ToImage(),
+        Resize((input_size, input_size)),
+        ToDtype(torch.float32, scale=True),
+        Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+
+
 def prepare_datasets(args, device):
     input_size = getattr(args, "input_size", 336)
     print(f"Using input size: {input_size}x{input_size}")
@@ -75,12 +84,7 @@ def prepare_datasets(args, device):
         ToDtype(torch.float32, scale=True),
         Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
-    valid_transform = Compose([
-        ToImage(),
-        Resize((input_size, input_size)),
-        ToDtype(torch.float32, scale=True),
-        Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
+    valid_transform = build_eval_transform(input_size)
 
     centers = [
         folder
