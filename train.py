@@ -1470,6 +1470,7 @@ def main(args):
         if gradcam_payload is not None:
             extra_payload.update(gradcam_payload)
 
+
         log_metrics(
             epoch,
             optimizer,
@@ -1506,6 +1507,7 @@ def main(args):
                 and np.isclose(current_valid_projected_ppv, best_valid_projected_ppv)
             )
         )
+        # Best-checkpoint selection lives here: maximize projected 1% validation PPV and break ties with lower validation FPR.
         is_better_checkpoint = (
             current_valid_projected_ppv > best_valid_projected_ppv
             or (same_projected_ppv and current_valid_fpr < best_valid_fpr)
