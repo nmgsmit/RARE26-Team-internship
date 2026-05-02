@@ -6,14 +6,19 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from torchvision.transforms.v2 import Compose, Normalize, Resize, ToDtype, ToImage
 
-from model import Model
+from model import Model, load_model_checkpoint, resolve_model_kwargs_from_checkpoint
 
 TEST_DIR = "/data/test"
 MODEL_PATH = "/app/model.pt"
 OUT_FILE = "/output/predictions.csv"
 BATCH_SIZE = 32
-BACKBONE_NAME = "vit_base_patch14_reg4_dinov2"
-INPUT_SIZE = 336
+DEFAULT_MODEL_KWARGS = {
+    "in_channels": 3,
+    "n_classes": 2,
+    "backbone_name": "vit_base_patch14_reg4_dinov2",
+    "input_size": 336,
+    "pretrained": False,
+}
 
 
 class TestDataset(Dataset):
@@ -39,9 +44,21 @@ class TestDataset(Dataset):
 def main():
     os.makedirs("/output", exist_ok=True)
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    checkpoint = torch.load(MODEL_PATH, map_location=device)
+    model_kwargs = resolve_model_kwargs_from_checkpoint(
+        checkpoint,
+        fallback_kwargs=DEFAULT_MODEL_KWARGS,
+    )
+    model_kwargs["pretrained"] = False
+
+    input_size = int(model_kwargs.get("input_size", DEFAULT_MODEL_KWARGS["input_size"]))
+    n_classes = int(model_kwargs.get("n_classes", DEFAULT_MODEL_KWARGS["n_classes"]))
+    backbone_name = model_kwargs.get("backbone_name", DEFAULT_MODEL_KWARGS["backbone_name"])
+
     transform = Compose([
         ToImage(),
-        Resize((INPUT_SIZE, INPUT_SIZE)),
+        Resize((input_size, input_size)),
         ToDtype(torch.float32, scale=True),
         Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
@@ -49,16 +66,15 @@ def main():
     dataset = TestDataset(TEST_DIR, transform)
     loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(
+        f"Resolved checkpoint model | backbone={backbone_name} | "
+        f"input_size={input_size} | n_classes={n_classes} | "
+        f"head_type={model_kwargs.get('head_type', 'unknown')}"
+    )
     model = Model(
-        in_channels=3,
-        n_classes=2,
-        backbone_name=BACKBONE_NAME,
-        input_size=INPUT_SIZE,
-        pretrained=False,
+        **model_kwargs,
     ).to(device)
-    state_dict = torch.load(MODEL_PATH, map_location=device)
-    model.load_state_dict(state_dict, strict=True)
+    load_model_checkpoint(model, MODEL_PATH, strict=True, map_location=device)
     model.eval()
 
     with open(OUT_FILE, "w", newline="") as handle:

@@ -5,6 +5,7 @@ numpy
 pillow
 wandb
 scikit-learn
+imbalanced-learn
 tqdm
 pyyaml
 pandas
