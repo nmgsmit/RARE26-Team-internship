@@ -1470,7 +1470,6 @@ def main(args):
         if gradcam_payload is not None:
             extra_payload.update(gradcam_payload)
 
-
         log_metrics(
             epoch,
             optimizer,
