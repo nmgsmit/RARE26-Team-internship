@@ -60,6 +60,7 @@ SMOTE_KNN_CENTER_AWARE="${SMOTE_KNN_CENTER_AWARE:-0}"
 
 GASTRONET_CKPT="${GASTRONET_CKPT:-../Gastronet/dinov2.pth}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+FORCE_PRETRAIN="${FORCE_PRETRAIN:-0}"
 
 BACKBONES_CSV="${BACKBONES_CSV:-gastronet,dinov3}"
 IFS=',' read -r -a BACKBONES <<< "${BACKBONES_CSV}"
@@ -127,6 +128,27 @@ run_python_train() {
     "${PYTHON_BIN}" train.py "${args[@]}"
 }
 
+resolve_encoder_checkpoint() {
+    local backbone="$1"
+    local pretrain_experiment_id="$2"
+    local primary_ckpt="${SAVE_DIR}/${pretrain_experiment_id}_encoder.pt"
+
+    local candidates=(
+        "${primary_ckpt}"
+        "./checkpoints/${pretrain_experiment_id}_encoder.pt"
+        "./checkpoints/${backbone}_pretrain_${PRETRAIN_LOSS}_encoder.pt"
+    )
+
+    for candidate in "${candidates[@]}"; do
+        if [ -f "${candidate}" ]; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 build_finetune_suffix() {
     local suffix=""
     if [ "${ENABLE_SMOTE}" = "1" ]; then
@@ -151,10 +173,21 @@ for backbone in "${BACKBONES[@]}"; do
     pretrain_experiment_id="${backbone}_pretrain_${PRETRAIN_LOSS}"
     encoder_ckpt="${SAVE_DIR}/${pretrain_experiment_id}_encoder.pt"
 
-    mapfile -t pretrain_args < <(
-        build_common_args "pretrain" "${backbone}" "${PRETRAIN_LOSS}" "${pretrain_experiment_id}" "${PRETRAIN_EPOCHS}"
-    )
-    run_python_train "${pretrain_args[@]}"
+    if [ "${FORCE_PRETRAIN}" != "1" ] && resolved_encoder_ckpt="$(resolve_encoder_checkpoint "${backbone}" "${pretrain_experiment_id}")"; then
+        encoder_ckpt="${resolved_encoder_ckpt}"
+        echo
+        echo "Found existing pretrained encoder checkpoint: ${encoder_ckpt}"
+        echo "Skipping pretraining and reusing the existing encoder. Set FORCE_PRETRAIN=1 to retrain it."
+    else
+        if [ "${FORCE_PRETRAIN}" = "1" ]; then
+            echo
+            echo "FORCE_PRETRAIN=1, so pretraining will run even if an encoder checkpoint already exists."
+        fi
+        mapfile -t pretrain_args < <(
+            build_common_args "pretrain" "${backbone}" "${PRETRAIN_LOSS}" "${pretrain_experiment_id}" "${PRETRAIN_EPOCHS}"
+        )
+        run_python_train "${pretrain_args[@]}"
+    fi
 
     finetune_suffix="$(build_finetune_suffix)"
     finetune_experiment_id="${backbone}_finetune_${PRETRAIN_LOSS}_${FINETUNE_LOSS}_${HEAD_TYPE}${finetune_suffix}"
