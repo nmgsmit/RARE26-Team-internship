@@ -35,6 +35,7 @@ SMOTE_FEATURE_SPACE="${SMOTE_FEATURE_SPACE:-projection}"
 SMOTE_NEIGHBORS="${SMOTE_NEIGHBORS:-3}"
 SMOTE_SAMPLING_STRATEGY="${SMOTE_SAMPLING_STRATEGY:-minority}"
 SMOTE_SYNTHETIC_RATIO="${SMOTE_SYNTHETIC_RATIO:-0.10}"
+SMOTE_WARMSTART_EPOCHS="${SMOTE_WARMSTART_EPOCHS:-3}"
 SMOTE_REFINE_STEPS="${SMOTE_REFINE_STEPS:-3}"
 SMOTE_REFINE_STEP_SIZE="${SMOTE_REFINE_STEP_SIZE:-0.01}"
 SMOTE_ENERGY_EPOCHS="${SMOTE_ENERGY_EPOCHS:-25}"
@@ -130,6 +131,9 @@ build_finetune_suffix() {
     local suffix=""
     if [ "${ENABLE_SMOTE}" = "1" ]; then
         suffix="_${SMOTE_FEATURE_SPACE}_smote"
+        if [ "${FINETUNE_TRAIN_MODE:-probe}" != "probe" ]; then
+            suffix="${suffix}_warmstart_${FINETUNE_TRAIN_MODE:-last_block}"
+        fi
         if [ "${ENABLE_SMOTE_FILTER}" = "1" ]; then
             suffix="${suffix}_energy"
         fi
@@ -167,6 +171,7 @@ for backbone in "${BACKBONES[@]}"; do
             --smote-neighbors "${SMOTE_NEIGHBORS}"
             --smote-sampling-strategy "${SMOTE_SAMPLING_STRATEGY}"
             --smote-synthetic-ratio "${SMOTE_SYNTHETIC_RATIO}"
+            --smote-warmstart-epochs "${SMOTE_WARMSTART_EPOCHS}"
             --smote-energy-epochs "${SMOTE_ENERGY_EPOCHS}"
             --smote-energy-lr "${SMOTE_ENERGY_LR}"
             --smote-energy-weight-decay "${SMOTE_ENERGY_WEIGHT_DECAY}"

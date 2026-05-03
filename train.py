@@ -203,6 +203,15 @@ def get_args_parser():
     parser.add_argument("--smote-energy-refine-anchor-weight", type=float, default=5.0)
     parser.add_argument("--smote-energy-refine-margin-weight", type=float, default=2.0)
     parser.add_argument("--smote-energy-refine-target-margin", type=float, default=0.05)
+    parser.add_argument(
+        "--smote-warmstart-epochs",
+        type=int,
+        default=3,
+        help=(
+            "Number of embedding-space warm-start epochs run on real + synthetic samples "
+            "before standard image finetuning when --finetune-train-mode is not probe."
+        ),
+    )
 
     parser.add_argument("--data-dir", type=str, default="./data")
     parser.add_argument("--batch-size", type=int, default=32)
@@ -385,6 +394,8 @@ def canonicalize_loss_name(loss_name):
 
 
 def resolve_runtime_config(args):
+    requested_classifier_input = args.classifier_input
+    requested_finetune_train_mode = args.finetune_train_mode
     if args.loss_name is None:
         args.loss_name = args.method
     if args.loss_name is None:
@@ -411,18 +422,20 @@ def resolve_runtime_config(args):
             "Baseline and finetune stages only support supervised losses. "
             "Use --loss-name ce or --loss-name class-balanced."
         )
-    if args.classifier_input is None:
-        args.classifier_input = "projection" if args.finetune_with_smote else "pooled"
     if args.finetune_train_mode is None:
         args.finetune_train_mode = "probe" if args.finetune_with_smote else "last_block"
+    if args.classifier_input is None:
+        if args.finetune_with_smote and args.finetune_train_mode == "probe":
+            args.classifier_input = "projection"
+        else:
+            args.classifier_input = "pooled"
     if args.finetune_with_smote and args.stage != "finetune":
         raise ValueError("--finetune-with-smote is only supported with --stage finetune.")
-    if args.finetune_with_smote and args.finetune_train_mode != "probe":
-        raise ValueError(
-            "SMOTE finetuning trains a classifier probe on cached encoder embeddings, so it "
-            "requires --finetune-train-mode probe."
-        )
-    if args.finetune_with_smote and args.classifier_input != args.smote_feature_space:
+    if (
+        args.finetune_with_smote
+        and args.finetune_train_mode == "probe"
+        and args.classifier_input != args.smote_feature_space
+    ):
         raise ValueError(
             "SMOTE finetuning requires --classifier-input to match --smote-feature-space so "
             "the classifier operates in the same embedding space used for synthesis."
@@ -470,6 +483,29 @@ def resolve_runtime_config(args):
         raise ValueError(
             "--smote-energy-refine-target-margin must be >= 0, "
             f"got {args.smote_energy_refine_target_margin}."
+        )
+    if args.smote_warmstart_epochs < 0:
+        raise ValueError(
+            f"--smote-warmstart-epochs must be >= 0, got {args.smote_warmstart_epochs}."
+        )
+    if (
+        args.finetune_with_smote
+        and args.finetune_train_mode != "probe"
+        and requested_classifier_input is None
+    ):
+        print(
+            "SMOTE + real finetune detected without an explicit classifier space. "
+            "Defaulting to pooled classifier features so the SMOTE stage warm-starts the "
+            "same head used by the stronger image finetune baseline."
+        )
+    if (
+        args.finetune_with_smote
+        and args.finetune_train_mode == "probe"
+        and requested_finetune_train_mode is None
+    ):
+        print(
+            "SMOTE run is using the default finetune_train_mode=probe. "
+            "Set --finetune-train-mode last_block to use SMOTE as a warm-start for actual finetuning."
         )
 
     if args.head_hidden_dim is not None and args.head_hidden_dim <= 0:
@@ -574,7 +610,7 @@ def validate_post_train_gradcam_dataset(args):
     return dataset_root
 
 
-def run_post_training_gradcam(args, model, device, final_save_path, best_save_path):
+def run_post_training_gradcam(args, model, device, final_save_path, best_save_path, segmentation_loader=None):
     gradcam_dataset_root = validate_post_train_gradcam_dataset(args)
     print(
         f"Running post-training Barrett Grad-CAM evaluation from {gradcam_dataset_root} "
@@ -633,6 +669,28 @@ def run_post_training_gradcam(args, model, device, final_save_path, best_save_pa
         f"Negative mean prob: {gradcam_result['summary_payload']['gradcam/negative/mean_positive_class_probability']:.4f} | "
         f"Flat/near-zero CAM frac: {gradcam_result['summary_payload']['gradcam/overall/fraction_flat_or_near_zero_cams']:.4f}"
     )
+
+    if segmentation_loader is not None:
+        segmentation_payload = evaluate_gradcam_segmentation_dataset(
+            model=model,
+            loader=segmentation_loader,
+            device=device,
+            target_class=args.gradcam_target_class,
+            threshold=args.gradcam_threshold,
+            max_log_samples=args.gradcam_log_samples,
+            skip_empty_masks=args.gradcam_skip_empty_masks,
+            split_name="segmentation",
+        )
+        if segmentation_payload:
+            wandb.log(segmentation_payload)
+            for key, value in segmentation_payload.items():
+                wandb.summary[key] = value
+        print(
+            "Post-training segmentation Grad-CAM summary | "
+            f"Mean Dice: {segmentation_payload['segmentation/mean_dice']:.4f} | "
+            f"Scored: {segmentation_payload['segmentation/dice_scored_samples']} | "
+            f"Skipped empty: {segmentation_payload['segmentation/dice_skipped_empty_masks']}"
+        )
 
 
 class EnergyMLP(nn.Module):
@@ -1423,46 +1481,8 @@ def run_smote_finetune(
         f"rejected={smote_diagnostics['rejected_total']}"
     )
 
-    criterion = build_supervised_criterion_from_labels(
-        args.loss_name,
-        resampled_labels.tolist(),
-        len(class_names),
-        device,
-    )
-    feature_loader = make_feature_loader(resampled_features, resampled_labels, args, shuffle=True)
-    optimizer = AdamW(model.cls_head.parameters(), lr=args.lr)
-    scheduler = build_finetune_scheduler(optimizer, args.epochs)
-
-    projected_prevalence = 0.01
-    best_valid_projected_ppv = float("-inf")
-    best_valid_fpr = float("inf")
-    smote_payload = {f"smote/{key}": value for key, value in smote_diagnostics.items()}
-
-    for epoch in range(args.epochs):
-        model.train()
-        train_loss = 0.0
-        train_correct = 0
-        train_total = 0
-
-        for batch_features, batch_labels in feature_loader:
-            batch_features = batch_features.to(device)
-            batch_labels = batch_labels.to(device)
-
-            optimizer.zero_grad()
-            logits = model.classify(batch_features)
-            loss = criterion(logits, batch_labels)
-            loss.backward()
-            optimizer.step()
-
-            batch_size = batch_labels.size(0)
-            train_loss += loss.item() * batch_size
-            train_correct += (torch.argmax(logits, dim=1) == batch_labels).sum().item()
-            train_total += batch_size
-
-        scheduler.step()
-
-        avg_train_loss = train_loss / max(1, train_total)
-        train_accuracy = train_correct / max(1, train_total)
+    def run_validation_and_logging(epoch_index, optimizer, avg_train_loss, train_accuracy, criterion):
+        nonlocal best_valid_projected_ppv, best_valid_fpr
 
         model.eval()
         valid_loss = 0.0
@@ -1502,7 +1522,7 @@ def run_smote_finetune(
         )
 
         print(
-            f"Epoch {epoch + 1:02d}/{args.epochs} | "
+            f"Epoch {epoch_index + 1:02d}/{args.epochs} | "
             f"SMOTE Train Loss: {avg_train_loss:.4f} | Train Acc: {train_accuracy:.4f} | "
             f"Val Loss: {avg_valid_loss:.4f} | Val Acc: {valid_accuracy:.4f} | "
             f"Val AUPRC: {valid_metrics['AUPRC']:.4f} | Val AUROC: {valid_metrics['AUROC']:.4f} | "
@@ -1513,7 +1533,7 @@ def run_smote_finetune(
         )
 
         log_metrics(
-            epoch,
+            epoch_index,
             optimizer,
             avg_train_loss,
             train_accuracy,
@@ -1567,7 +1587,7 @@ def run_smote_finetune(
                     checkpoint_model_config,
                     extra_metadata={
                         "experiment_id": args.experiment_id,
-                        "epoch": epoch + 1,
+                        "epoch": epoch_index + 1,
                         "selected_threshold": valid_threshold,
                         "stage": args.stage,
                         "loss_name": args.loss_name,
@@ -1582,6 +1602,125 @@ def run_smote_finetune(
                 f"(1% PPV: {valid_projected_metrics['Projected PPV']:.4f}, "
                 f"FPR: {valid_metrics['FPR']:.4f}, Threshold: {valid_threshold:.4f})"
             )
+
+    projected_prevalence = 0.01
+    best_valid_projected_ppv = float("-inf")
+    best_valid_fpr = float("inf")
+    smote_payload = {f"smote/{key}": value for key, value in smote_diagnostics.items()}
+
+    warmstart_criterion = build_supervised_criterion_from_labels(
+        args.loss_name,
+        resampled_labels.tolist(),
+        len(class_names),
+        device,
+    )
+    feature_loader = make_feature_loader(resampled_features, resampled_labels, args, shuffle=True)
+    warmstart_parameters = list(model.cls_head.parameters())
+    if model.classifier_input == "projection":
+        warmstart_parameters = list(model.proj_head.parameters()) + warmstart_parameters
+    warmstart_optimizer = AdamW(warmstart_parameters, lr=args.lr)
+    warmstart_epochs = (
+        args.epochs if args.finetune_train_mode == "probe" else int(args.smote_warmstart_epochs)
+    )
+    if warmstart_epochs > 0:
+        warmstart_scheduler = build_finetune_scheduler(warmstart_optimizer, warmstart_epochs)
+        for warm_epoch in range(warmstart_epochs):
+            model.train()
+            train_loss = 0.0
+            train_correct = 0
+            train_total = 0
+
+            for batch_features, batch_labels in feature_loader:
+                batch_features = batch_features.to(device)
+                batch_labels = batch_labels.to(device)
+
+                warmstart_optimizer.zero_grad()
+                logits = model.classify(batch_features)
+                loss = warmstart_criterion(logits, batch_labels)
+                loss.backward()
+                warmstart_optimizer.step()
+
+                batch_size = batch_labels.size(0)
+                train_loss += loss.item() * batch_size
+                train_correct += (torch.argmax(logits, dim=1) == batch_labels).sum().item()
+                train_total += batch_size
+
+            warmstart_scheduler.step()
+
+            avg_train_loss = train_loss / max(1, train_total)
+            train_accuracy = train_correct / max(1, train_total)
+            print(
+                f"Warm-start Epoch {warm_epoch + 1:02d}/{max(1, warmstart_epochs)} | "
+                f"Loss: {avg_train_loss:.4f} | Acc: {train_accuracy:.4f}"
+            )
+
+            if args.finetune_train_mode == "probe":
+                run_validation_and_logging(
+                    warm_epoch,
+                    warmstart_optimizer,
+                    avg_train_loss,
+                    train_accuracy,
+                    warmstart_criterion,
+                )
+
+    if args.finetune_train_mode == "probe":
+        torch.save(
+            create_model_checkpoint(
+                model,
+                checkpoint_model_config,
+                extra_metadata={
+                    "experiment_id": args.experiment_id,
+                    "epoch": args.epochs,
+                    "stage": args.stage,
+                    "loss_name": args.loss_name,
+                    "finetune_with_smote": True,
+                    "smote_diagnostics": smote_diagnostics,
+                },
+            ),
+            final_save_path,
+        )
+        print(f"Saved final model: {final_save_path}")
+        return
+
+    print(
+        "Starting image-level finetuning after SMOTE warm-start | "
+        f"train_mode={args.finetune_train_mode} | classifier_input={args.classifier_input}"
+    )
+    image_criterion = build_supervised_criterion(args.loss_name, train_ds, len(class_names), device)
+    image_optimizer = AdamW(
+        [parameter for parameter in model.parameters() if parameter.requires_grad],
+        lr=args.lr,
+    )
+    image_scheduler = build_finetune_scheduler(image_optimizer, args.epochs)
+
+    for epoch in range(args.epochs):
+        model.train()
+        train_loss = 0.0
+        train_correct = 0
+        train_total = 0
+
+        for images1, images2, labels in train_loader:
+            images1 = images1.to(device)
+            images2 = images2.to(device)
+            labels = labels.to(device).long()
+
+            image_optimizer.zero_grad()
+            logits1 = model(images1)
+            logits2 = model(images2)
+            loss = 0.5 * (image_criterion(logits1, labels) + image_criterion(logits2, labels))
+            loss.backward()
+            image_optimizer.step()
+
+            batch_size = labels.size(0)
+            train_loss += loss.item() * batch_size
+            train_correct += (torch.argmax(logits1, dim=1) == labels).sum().item()
+            train_total += batch_size
+
+        image_scheduler.step()
+
+        avg_train_loss = train_loss / max(1, train_total)
+        train_accuracy = train_correct / max(1, train_total)
+        run_validation_and_logging(epoch, image_optimizer, avg_train_loss, train_accuracy, image_criterion)
 
     torch.save(
         create_model_checkpoint(
@@ -1724,6 +1863,7 @@ def main(args):
                 device=device,
                 final_save_path=os.path.join(args.save_dir, f"{args.experiment_id}_final.pt"),
                 best_save_path=os.path.join(args.save_dir, f"{args.experiment_id}_best.pt"),
+                segmentation_loader=segmentation_loader,
             )
         print(f"Class mapping: {class_names}")
         print("Training finished! Check your WandB dashboard.")
@@ -1877,27 +2017,6 @@ def main(args):
             prevalence=projected_prevalence,
         )
 
-        gradcam_payload = None
-        if segmentation_loader is not None and (epoch + 1) % args.gradcam_eval_every == 0:
-            gradcam_payload = evaluate_gradcam_segmentation_dataset(
-                model=model,
-                loader=segmentation_loader,
-                device=device,
-                target_class=args.gradcam_target_class,
-                threshold=args.gradcam_threshold,
-                max_log_samples=args.gradcam_log_samples,
-                skip_empty_masks=args.gradcam_skip_empty_masks,
-                split_name="segmentation",
-            )
-
-        gradcam_summary = ""
-        if gradcam_payload is not None:
-            gradcam_summary = (
-                f" | Seg Mean Dice: {gradcam_payload['segmentation/mean_dice']:.4f} "
-                f"| Seg Scored: {gradcam_payload['segmentation/dice_scored_samples']} "
-                f"| Seg Skipped Empty: {gradcam_payload['segmentation/dice_skipped_empty_masks']}"
-            )
-
         print(
             f"Epoch {epoch + 1:02d}/{args.epochs} | "
             f"Train Loss: {avg_train_loss:.4f} | Train Acc: {train_accuracy:.4f} | "
@@ -1912,7 +2031,6 @@ def main(args):
             f"Test FPR: {test_metrics['FPR']:.4f} | Test PPV: {test_metrics['PPV']:.4f} | "
             f"1%Test PPV: {test_projected_metrics['Projected PPV']:.4f} | "
             f"1%Test FP/1000: {test_projected_metrics['Projected FP per 1000']:.2f}"
-            f"{gradcam_summary}"
         )
 
         extra_payload = {
@@ -1924,8 +2042,6 @@ def main(args):
             "train/loss_supmin": avg_train_supmin,
             "train/loss_suppro": avg_train_suppro,
         }
-        if gradcam_payload is not None:
-            extra_payload.update(gradcam_payload)
 
         log_metrics(
             epoch,
@@ -2030,6 +2146,7 @@ def main(args):
                 device=device,
                 final_save_path=final_save_path,
                 best_save_path=best_save_path,
+                segmentation_loader=segmentation_loader,
             )
 
     print(f"Class mapping: {class_names}")
