@@ -146,9 +146,22 @@ def _detect_fullwidth_mlp_config(state_dict):
         "head_type": "mlp_fullwidth",
         "mlp_hidden_layers": len(linear_layer_indices) - 1,
         "mlp_hidden_dim": int(first_linear_weight.shape[0]),
+        "classifier_input_dim": int(first_linear_weight.shape[1]),
         "mlp_dropout": 0.0,
         "n_classes": int(last_linear_weight.shape[0]),
     }
+
+
+def _infer_classifier_input_from_state_dict(state_dict, inferred_config):
+    proj_out_weight = state_dict.get("proj_head.2.weight")
+    if proj_out_weight is None:
+        return "pooled"
+
+    proj_dim = int(proj_out_weight.shape[0])
+    classifier_input_dim = inferred_config.get("classifier_input_dim")
+    if classifier_input_dim is None:
+        return "pooled"
+    return "projection" if int(classifier_input_dim) == proj_dim else "pooled"
 
 
 def infer_backbone_input_config_from_state_dict(state_dict):
@@ -203,12 +216,14 @@ def infer_model_config_from_state_dict(state_dict):
     if "head.logit_scale" in state_keys:
         return {
             "head_type": "cosine_linear",
+            "classifier_input_dim": int(state_dict["head.weight"].shape[1]),
             "n_classes": int(state_dict["head.weight"].shape[0]),
         }
 
     if "head.input_norm.weight" in state_keys and "head.classifier.weight" in state_keys:
         return {
             "head_type": "residual_bottleneck",
+            "classifier_input_dim": int(state_dict["head.up_proj.weight"].shape[1]),
             "head_hidden_dim": int(state_dict["head.up_proj.weight"].shape[0]),
             "head_dropout": 0.1,
             "n_classes": int(state_dict["head.classifier.weight"].shape[0]),
@@ -217,6 +232,7 @@ def infer_model_config_from_state_dict(state_dict):
     if "head.net.1.weight" in state_keys and "head.net.4.weight" in state_keys:
         return {
             "head_type": "mlp_bottleneck",
+            "classifier_input_dim": int(state_dict["head.net.1.weight"].shape[1]),
             "head_hidden_dim": int(state_dict["head.net.1.weight"].shape[0]),
             "head_dropout": 0.0,
             "n_classes": int(state_dict["head.net.4.weight"].shape[0]),
@@ -225,6 +241,7 @@ def infer_model_config_from_state_dict(state_dict):
     if "head.norm.weight" in state_keys and "head.classifier.weight" in state_keys:
         return {
             "head_type": "ln_linear",
+            "classifier_input_dim": int(state_dict["head.classifier.weight"].shape[1]),
             "n_classes": int(state_dict["head.classifier.weight"].shape[0]),
         }
 
@@ -235,6 +252,7 @@ def infer_model_config_from_state_dict(state_dict):
     if "head.weight" in state_keys and "head.bias" in state_keys:
         return {
             "head_type": "linear",
+            "classifier_input_dim": int(state_dict["head.weight"].shape[1]),
             "n_classes": int(state_dict["head.weight"].shape[0]),
         }
 
@@ -255,6 +273,10 @@ def resolve_model_kwargs_from_checkpoint(checkpoint, fallback_kwargs=None):
     state_dict = extract_model_state_dict(checkpoint)
     inferred_backbone_kwargs = infer_backbone_input_config_from_state_dict(state_dict)
     inferred_kwargs = infer_model_config_from_state_dict(state_dict)
+    inferred_kwargs["classifier_input"] = _infer_classifier_input_from_state_dict(
+        state_dict, inferred_kwargs
+    )
+    inferred_kwargs.pop("classifier_input_dim", None)
 
     resolved_kwargs = dict(fallback_kwargs)
     resolved_kwargs.update(inferred_backbone_kwargs)
@@ -271,6 +293,81 @@ def create_model_checkpoint(model, model_config, extra_metadata=None):
     if extra_metadata:
         payload.update(extra_metadata)
     return payload
+
+
+def _adapt_encoder_proj_head_state_dict(proj_head_state, model_proj_head_state):
+    cleaned_state = _clean_state_dict_keys(proj_head_state)
+
+    expected_keys = set(model_proj_head_state.keys())
+    if set(cleaned_state.keys()) == expected_keys:
+        return cleaned_state, False
+
+    adapted_state = dict(model_proj_head_state)
+    used_source_keys = set()
+
+    for target_key in ("0.weight", "0.bias", "2.weight", "2.bias"):
+        target_tensor = model_proj_head_state[target_key]
+        if target_key in cleaned_state and cleaned_state[target_key].shape == target_tensor.shape:
+            adapted_state[target_key] = cleaned_state[target_key]
+            used_source_keys.add(target_key)
+
+    if "0.weight" not in used_source_keys:
+        for source_key, source_tensor in cleaned_state.items():
+            if (
+                source_tensor.ndim == 2
+                and source_tensor.shape == model_proj_head_state["0.weight"].shape
+            ):
+                adapted_state["0.weight"] = source_tensor
+                used_source_keys.add(source_key)
+                break
+
+    if "2.weight" not in used_source_keys:
+        matching_linear_keys = [
+            source_key
+            for source_key, source_tensor in cleaned_state.items()
+            if (
+                source_tensor.ndim == 2
+                and source_tensor.shape == model_proj_head_state["2.weight"].shape
+                and source_key not in used_source_keys
+            )
+        ]
+        if matching_linear_keys:
+            adapted_state["2.weight"] = cleaned_state[matching_linear_keys[-1]]
+            used_source_keys.add(matching_linear_keys[-1])
+
+    if "0.bias" not in used_source_keys:
+        for source_key, source_tensor in cleaned_state.items():
+            if (
+                source_tensor.ndim == 1
+                and source_tensor.shape == model_proj_head_state["0.bias"].shape
+                and ".running_" not in source_key
+                and not source_key.endswith("num_batches_tracked")
+                and source_key not in used_source_keys
+            ):
+                adapted_state["0.bias"] = source_tensor
+                used_source_keys.add(source_key)
+                break
+
+    if "2.bias" not in used_source_keys:
+        for source_key, source_tensor in cleaned_state.items():
+            if (
+                source_tensor.ndim == 1
+                and source_tensor.shape == model_proj_head_state["2.bias"].shape
+                and ".running_" not in source_key
+                and not source_key.endswith("num_batches_tracked")
+                and source_key not in used_source_keys
+            ):
+                adapted_state["2.bias"] = source_tensor
+                used_source_keys.add(source_key)
+                break
+
+    successfully_adapted = (
+        adapted_state["0.weight"].shape == model_proj_head_state["0.weight"].shape
+        and adapted_state["0.bias"].shape == model_proj_head_state["0.bias"].shape
+        and adapted_state["2.weight"].shape == model_proj_head_state["2.weight"].shape
+        and adapted_state["2.bias"].shape == model_proj_head_state["2.bias"].shape
+    )
+    return adapted_state, successfully_adapted
 
 
 def load_encoder_checkpoint(model, checkpoint_path, strict=True):
@@ -295,8 +392,13 @@ def load_encoder_checkpoint(model, checkpoint_path, strict=True):
         _clean_state_dict_keys(backbone_state),
         strict=strict,
     )
+    model_proj_head_state = model.proj_head.state_dict()
+    adapted_proj_head_state, proj_head_adapted = _adapt_encoder_proj_head_state_dict(
+        proj_head_state,
+        model_proj_head_state,
+    )
     proj_incompatible = model.proj_head.load_state_dict(
-        _clean_state_dict_keys(proj_head_state),
+        adapted_proj_head_state,
         strict=strict,
     )
 
@@ -312,6 +414,11 @@ def load_encoder_checkpoint(model, checkpoint_path, strict=True):
                 "Projection head weights in the encoder checkpoint are incompatible with "
                 f"the requested model. Missing keys: {proj_incompatible.missing_keys}. "
                 f"Unexpected keys: {proj_incompatible.unexpected_keys}."
+            )
+        if proj_head_adapted:
+            print(
+                "[INFO] Adapted legacy encoder projection-head weights to the current "
+                "projection-head architecture."
             )
 
 
@@ -500,6 +607,7 @@ class Model(nn.Module):
         freeze_backbone=False,
         pretrained=None,
         proj_dim=128,
+        classifier_input="pooled",
         head_type="mlp_fullwidth",
         head_hidden_dim=None,
         head_dropout=0.0,
@@ -534,6 +642,12 @@ class Model(nn.Module):
 
         self.feat_dim = feat_dim
         self.feature_dim = feat_dim
+        if classifier_input not in {"pooled", "projection"}:
+            raise ValueError(
+                f"classifier_input must be 'pooled' or 'projection', got {classifier_input!r}."
+            )
+        self.classifier_input = classifier_input
+        self.proj_dim = int(proj_dim)
         self.proj_head = nn.Sequential(
             nn.Linear(feat_dim, feat_dim),
             nn.GELU(),
@@ -541,8 +655,9 @@ class Model(nn.Module):
         )
         self.head_type = head_type
         self.classifier_hidden_layers = mlp_hidden_layers
+        head_in_features = self.proj_dim if self.classifier_input == "projection" else feat_dim
         self.head, classifier_description, resolved_hidden_dim = _build_classifier_head(
-            feat_dim,
+            head_in_features,
             n_classes,
             head_type=head_type,
             head_hidden_dim=head_hidden_dim,
@@ -552,7 +667,9 @@ class Model(nn.Module):
             mlp_dropout=mlp_dropout,
         )
         self.classifier_hidden_dim = resolved_hidden_dim
-        self.classifier_description = classifier_description
+        self.classifier_description = (
+            f"{classifier_description} on {self.classifier_input} features"
+        )
 
     @property
     def cls_head(self):
@@ -571,18 +688,32 @@ class Model(nn.Module):
     def project(self, feat):
         return F.normalize(self.proj_head(feat), dim=-1)
 
-    def classify(self, feat):
-        return self.head(feat)
+    def classifier_features_from_pooled(self, feat):
+        if self.classifier_input == "projection":
+            return self.project(feat)
+        return feat
+
+    def classify(self, classifier_features):
+        return self.head(classifier_features)
+
+    def logits_from_pooled_features(self, feat):
+        classifier_features = self.classifier_features_from_pooled(feat)
+        return self.classify(classifier_features)
 
     def forward_from_tokens(self, tokens, return_embedding=False):
         feat = self.pooled_features_from_tokens(tokens)
-        logits = self.classify(feat)
+        classifier_features = self.classifier_features_from_pooled(feat)
+        logits = self.classify(classifier_features)
 
         if not return_embedding:
             return logits
 
         embedding = self.project(feat)
-        return {"logits": logits, "embedding": embedding}
+        return {
+            "logits": logits,
+            "embedding": embedding,
+            "classifier_features": classifier_features,
+        }
 
     def forward(self, x, return_embedding=False):
         tokens = self.forward_tokens(x)
