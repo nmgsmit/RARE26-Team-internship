@@ -1435,6 +1435,7 @@ def extract_dataset_embeddings(model, dataset, args, device, feature_space):
 def run_smote_finetune(
     args,
     model,
+    train_loader,
     train_ds,
     valid_loader,
     testset_loader,
@@ -1847,6 +1848,7 @@ def main(args):
         run_smote_finetune(
             args=args,
             model=model,
+            train_loader=train_loader,
             train_ds=train_ds,
             valid_loader=valid_loader,
             testset_loader=testset_loader,
