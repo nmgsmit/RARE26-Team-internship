@@ -55,6 +55,9 @@ GASTRONET_CKPT="${GASTRONET_CKPT:-../Gastronet/dinov2.pth}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 FORCE_PRETRAIN="${FORCE_PRETRAIN:-0}"
 
+
+# Force encoder_ckpt to the specified checkpoint for all runs
+ENCODER_CKPT_OVERRIDE="./checkpoints/linear_suppro_dual_backbone/gastronet_pretrain_suppro_encoder.pt"
 IFS=',' read -r -a BACKBONES <<< "${BACKBONES_CSV}"
 
 mkdir -p "${SAVE_DIR}"
@@ -273,7 +276,7 @@ run_finetune_variant() {
     mapfile -t finetune_args < <(
         build_common_args "finetune" "${backbone}" "${FINETUNE_LOSS}" "${finetune_experiment_id}" "${FINETUNE_EPOCHS}" "${enable_roi}"
     )
-    finetune_args+=(--encoder-ckpt "${encoder_ckpt}")
+    finetune_args+=(--encoder-ckpt "${ENCODER_CKPT_OVERRIDE}")
     if [ "${ENABLE_SMOTE}" = "1" ]; then
         append_smote_args finetune_args
     fi
@@ -282,23 +285,14 @@ run_finetune_variant() {
 
 for backbone in "${BACKBONES[@]}"; do
     pretrain_experiment_id="${backbone}_pretrain_${PRETRAIN_LOSS}"
-    encoder_ckpt="${SAVE_DIR}/${pretrain_experiment_id}_encoder.pt"
-
-    if [ "${FORCE_PRETRAIN}" != "1" ] && resolved_encoder_ckpt="$(resolve_encoder_checkpoint "${backbone}" "${pretrain_experiment_id}")"; then
-        encoder_ckpt="${resolved_encoder_ckpt}"
-        echo
-        echo "Found existing pretrained encoder checkpoint: ${encoder_ckpt}"
-        echo "Skipping pretraining and reusing the existing encoder. Set FORCE_PRETRAIN=1 to retrain it."
-    else
-        if [ "${FORCE_PRETRAIN}" = "1" ]; then
-            echo
-            echo "FORCE_PRETRAIN=1, so pretraining will run even if an encoder checkpoint already exists."
-        fi
-        mapfile -t pretrain_args < <(
-            build_common_args "pretrain" "${backbone}" "${PRETRAIN_LOSS}" "${pretrain_experiment_id}" "${PRETRAIN_EPOCHS}"
-        )
-        run_python_train "${pretrain_args[@]}"
+    if [ -n "${EXPERIMENT_ID_SUFFIX}" ]; then
+        pretrain_experiment_id="${pretrain_experiment_id}_${EXPERIMENT_ID_SUFFIX}"
     fi
+    encoder_ckpt="${ENCODER_CKPT_OVERRIDE}"
+
+    # Skipping pretraining and always using the override checkpoint
+    echo
+    echo "Using fixed encoder checkpoint: ${encoder_ckpt}"
 
     finetune_suffix="$(build_finetune_suffix)"
     if [ "${RUN_COMPARISON_BASELINE}" = "1" ]; then
