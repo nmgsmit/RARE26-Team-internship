@@ -52,8 +52,8 @@ find_pretrain_ckpt() {
 
 for BACKBONE in "${BACKBONES[@]}"; do
     for PRETRAIN_LOSS in "${PRETRAIN_LOSSES[@]}"; do
-        PRETRAIN_RUN_ID="${RUN_PREFIX}_${BACKBONE}_${PRETRAIN_LOSS}_pretrain"
-        PRETRAIN_SAVE_DIR="${SAVE_DIR_BASE}/${BACKBONE}/${PRETRAIN_LOSS}"
+        PRETRAIN_RUN_ID="${BACKBONE}_pretrain_${PRETRAIN_LOSS}"
+        PRETRAIN_SAVE_DIR="./checkpoints"
         mkdir -p "${PRETRAIN_SAVE_DIR}"
         if PRETRAIN_CKPT="$(find_pretrain_ckpt "${BACKBONE}" "${PRETRAIN_LOSS}" "${PRETRAIN_RUN_ID}" "${PRETRAIN_SAVE_DIR}")"; then
             echo
