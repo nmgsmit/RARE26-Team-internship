@@ -5,12 +5,14 @@ set -euo pipefail
 # Fill these in first for new runs.
 # This tag is added in front of the auto-generated stage/backbone experiment ids.
 EXPERIMENT_ID="${EXPERIMENT_ID:-${EXPERIMENT_ID_PREFIX:-}}"
+# Set this when you want to use the exact experiment id without auto-appending stage details.
+EXPERIMENT_ID_EXACT="${EXPERIMENT_ID_EXACT:-}"
 WANDB_GROUP="${WANDB_GROUP:-supcon}"
 
 # Crucial model choices.
 BACKBONES_CSV="${BACKBONES_CSV:-gastronet,dinov3}"
 PRETRAIN_LOSS="${PRETRAIN_LOSS:-suppro}"
-FINETUNE_LOSS="${FINETUNE_LOSS:-ce}"
+FINETUNE_LOSS="${FINETUNE_LOSS:-class-balanced}"
 HEAD_TYPE="${HEAD_TYPE:-linear}"
 
 # Checkpoint control. Leave PRETRAIN_CHECKPOINT blank to auto-detect one.
@@ -91,7 +93,9 @@ run_python_train() {
 
 build_experiment_id() {
     local base_id="$1"
-    if [ -n "${EXPERIMENT_ID}" ]; then
+    if [ -n "${EXPERIMENT_ID_EXACT}" ]; then
+        printf '%s\n' "${EXPERIMENT_ID_EXACT}"
+    elif [ -n "${EXPERIMENT_ID}" ]; then
         printf '%s_%s\n' "${EXPERIMENT_ID}" "${base_id}"
     else
         printf '%s\n' "${base_id}"

@@ -10,7 +10,7 @@ HEAD_TYPES=(linear ln_linear mlp_fullwidth)
 BACKBONES=(gastronet dinov3)
 PRETRAIN_LOSSES=(supmin suppro)
 
-FINETUNE_LOSS="${FINETUNE_LOSS:-ce}"
+FINETUNE_LOSS="${FINETUNE_LOSS:-class-balanced}"
 FINETUNE_EPOCHS="${FINETUNE_EPOCHS:-20}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 LR="${LR:-1e-4}"

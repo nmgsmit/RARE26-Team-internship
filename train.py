@@ -267,7 +267,7 @@ def resolve_runtime_config(args):
         args.loss_name = {
             "baseline": "class-balanced",
             "pretrain": "supmin",
-            "finetune": "ce",
+            "finetune": "class-balanced",
         }[args.stage]
     args.loss_name = canonicalize_loss_name(args.loss_name)
 

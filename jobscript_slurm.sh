@@ -50,5 +50,7 @@ print("Pretrained weights ready.")
 PY
 fi
 
-# Run training
-/bin/bash ./main.sh
+# Run training or sweep entrypoint.
+RUN_SCRIPT="${RUN_SCRIPT:-./main.sh}"
+echo "Launching ${RUN_SCRIPT}"
+/bin/bash "${RUN_SCRIPT}"
