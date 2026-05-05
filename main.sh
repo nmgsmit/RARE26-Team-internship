@@ -54,10 +54,7 @@ NUM_WORKERS="${NUM_WORKERS:-10}"
 GASTRONET_CKPT="${GASTRONET_CKPT:-../Gastronet/dinov2.pth}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 FORCE_PRETRAIN="${FORCE_PRETRAIN:-0}"
-
-
-# Force encoder_ckpt to the specified checkpoint for all runs
-ENCODER_CKPT_OVERRIDE="./checkpoints/linear_suppro_dual_backbone/gastronet_pretrain_suppro_encoder.pt"
+ENCODER_CKPT_OVERRIDE="${ENCODER_CKPT_OVERRIDE:-}"
 IFS=',' read -r -a BACKBONES <<< "${BACKBONES_CSV}"
 
 mkdir -p "${SAVE_DIR}"
@@ -203,7 +200,7 @@ build_finetune_variant_experiment_id() {
     local base_experiment_id="${backbone}_finetune_${PRETRAIN_LOSS}_${FINETUNE_LOSS}_${HEAD_TYPE}_${resolved_classifier_input}_${resolved_finetune_train_mode}${finetune_suffix}"
 
     # Append experiment id suffix if provided
-    if [ -n "$EXPERIMENT_ID_SUFFIX" ]; then
+    if [ -n "${EXPERIMENT_ID_SUFFIX:-}" ]; then
         base_experiment_id="${base_experiment_id}_${EXPERIMENT_ID_SUFFIX}"
     fi
 
@@ -276,7 +273,7 @@ run_finetune_variant() {
     mapfile -t finetune_args < <(
         build_common_args "finetune" "${backbone}" "${FINETUNE_LOSS}" "${finetune_experiment_id}" "${FINETUNE_EPOCHS}" "${enable_roi}"
     )
-    finetune_args+=(--encoder-ckpt "${ENCODER_CKPT_OVERRIDE}")
+    finetune_args+=(--encoder-ckpt "${encoder_ckpt}")
     if [ "${ENABLE_SMOTE}" = "1" ]; then
         append_smote_args finetune_args
     fi
@@ -285,14 +282,32 @@ run_finetune_variant() {
 
 for backbone in "${BACKBONES[@]}"; do
     pretrain_experiment_id="${backbone}_pretrain_${PRETRAIN_LOSS}"
-    if [ -n "${EXPERIMENT_ID_SUFFIX}" ]; then
+    if [ -n "${EXPERIMENT_ID_SUFFIX:-}" ]; then
         pretrain_experiment_id="${pretrain_experiment_id}_${EXPERIMENT_ID_SUFFIX}"
     fi
-    encoder_ckpt="${ENCODER_CKPT_OVERRIDE}"
+    encoder_ckpt=""
+    if [ -n "${ENCODER_CKPT_OVERRIDE}" ]; then
+        encoder_ckpt="${ENCODER_CKPT_OVERRIDE}"
+        echo
+        echo "Using override encoder checkpoint: ${encoder_ckpt}"
+    elif [ "${FORCE_PRETRAIN}" != "1" ]; then
+        if resolved_ckpt="$(resolve_encoder_checkpoint "${backbone}" "${pretrain_experiment_id}")"; then
+            encoder_ckpt="${resolved_ckpt}"
+            echo
+            echo "Reusing existing encoder checkpoint: ${encoder_ckpt}"
+        fi
+    fi
 
-    # Skipping pretraining and always using the override checkpoint
-    echo
-    echo "Using fixed encoder checkpoint: ${encoder_ckpt}"
+    if [ -z "${encoder_ckpt}" ]; then
+        echo
+        echo "Running pretraining for backbone=${backbone} -> ${pretrain_experiment_id}"
+        mapfile -t pretrain_args < <(
+            build_common_args "pretrain" "${backbone}" "${PRETRAIN_LOSS}" "${pretrain_experiment_id}" "${PRETRAIN_EPOCHS}" "0"
+        )
+        run_python_train "${pretrain_args[@]}"
+        encoder_ckpt="$(resolve_encoder_checkpoint "${backbone}" "${pretrain_experiment_id}")"
+        echo "Resolved fresh encoder checkpoint: ${encoder_ckpt}"
+    fi
 
     finetune_suffix="$(build_finetune_suffix)"
     if [ "${RUN_COMPARISON_BASELINE}" = "1" ]; then
