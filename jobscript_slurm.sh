@@ -30,13 +30,26 @@ else
     source venv/bin/activate
 fi
 
+# Reused venvs on shared systems can drift into a broken NumPy/SciPy state.
+# Validate the scientific stack on every job and self-heal if imports fail.
+if ! python - <<'PY'
+import numpy
+import sklearn
+print(f"Validated NumPy {numpy.__version__}")
+PY
+then
+    echo "Scientific Python stack is broken; rebuilding NumPy/SciPy/scikit-learn dependencies..."
+    pip install --upgrade pip setuptools wheel
+    pip install --no-cache-dir --force-reinstall "numpy<2" "scipy<1.13" "scikit-learn<1.6" "imbalanced-learn<0.13"
+    pip install --no-cache-dir -r requirements.txt
+fi
+
 # Cache Hugging Face downloads outside the repo and reuse them across jobs.
 export HF_HOME="${HF_HOME:-/scratch-shared/${USER}/hf_cache}"
 export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
 mkdir -p "${HF_HOME}" "${HF_HUB_CACHE}"
 
-# Git clones and worktrees on shared systems do not always preserve executable bits reliably.
-# Make the entrypoint scripts runnable before launching the pipeline.
+# Shared filesystems do not always preserve executable bits on cloned scripts.
 chmod +x ./jobscript_slurm.sh ./pipeline.sh ./main.sh
 
 TIMM_PRELOAD_MODEL="${TIMM_PRELOAD_MODEL:-}"
@@ -54,5 +67,7 @@ print("Pretrained weights ready.")
 PY
 fi
 
-# Run training
-/bin/bash ./pipeline.sh
+# Run the ROI pipeline unless explicitly overridden.
+RUN_SCRIPT="${RUN_SCRIPT:-./pipeline.sh}"
+echo "Launching ${RUN_SCRIPT}"
+/bin/bash "${RUN_SCRIPT}"

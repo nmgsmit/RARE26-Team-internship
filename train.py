@@ -94,6 +94,15 @@ def get_args_parser():
     )
     parser.add_argument("--method", type=str, default=None, help=SUPPRESS)
     parser.add_argument("--encoder-ckpt", type=str, default=None)
+    parser.add_argument(
+        "--init-encoder-ckpt",
+        type=str,
+        default=None,
+        help=(
+            "Optional encoder checkpoint used to initialize the backbone and projection head before "
+            "pretraining. This is intended for curriculum-style re-pretraining."
+        ),
+    )
     parser.add_argument("--warmup-epochs", type=int, default=3)
     parser.add_argument(
         "--classifier-input",
@@ -491,6 +500,8 @@ def resolve_runtime_config(args):
             "--roi-guided-training and --roi-records-path are mutually exclusive. "
             "Use saved ROI records for offline ROI-guided pretraining, or online Grad-CAM refresh for finetuning."
         )
+    if args.init_encoder_ckpt and args.stage != "pretrain":
+        raise ValueError("--init-encoder-ckpt is only supported for pretrain stage.")
     if args.finetune_train_mode is None:
         args.finetune_train_mode = "probe" if args.finetune_with_smote else "last_block"
     if args.classifier_input is None:
@@ -2000,6 +2011,8 @@ def main(args):
     )
     if args.roi_records_path:
         print(f"Saved ROI guidance configured from {args.roi_records_path}")
+    if args.init_encoder_ckpt:
+        print(f"Pretrain encoder initialization configured from {args.init_encoder_ckpt}")
     if args.roi_guided_training:
         print(
             "ROI-guided training configured | "
@@ -2067,6 +2080,9 @@ def main(args):
     if args.backbone_weights_path:
         print(f"Backbone weights initialized from {args.backbone_weights_path}")
     print(f"Using classifier head: {model.classifier_description} (type={args.head_type})")
+    if args.stage == "pretrain" and args.init_encoder_ckpt:
+        load_encoder_checkpoint(model, args.init_encoder_ckpt)
+        print(f"Loaded initialization encoder checkpoint from {args.init_encoder_ckpt}")
 
     checkpoint_model_config = {
         "in_channels": 3,
