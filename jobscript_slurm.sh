@@ -50,7 +50,7 @@ print("Pretrained weights ready.")
 PY
 fi
 
-# Run training or sweep entrypoint.
-RUN_SCRIPT="${RUN_SCRIPT:-./main.sh}"
+# Run the default backbone/loss/head sweep unless explicitly overridden.
+RUN_SCRIPT="${RUN_SCRIPT:-./sweep_backbone_loss_head.sh}"
 echo "Launching ${RUN_SCRIPT}"
 /bin/bash "${RUN_SCRIPT}"
