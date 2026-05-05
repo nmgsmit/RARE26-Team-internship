@@ -199,6 +199,11 @@ build_finetune_variant_experiment_id() {
     local resolved_finetune_train_mode="${FINETUNE_TRAIN_MODE:-last_block}"
     local base_experiment_id="${backbone}_finetune_${PRETRAIN_LOSS}_${FINETUNE_LOSS}_${HEAD_TYPE}_${resolved_classifier_input}_${resolved_finetune_train_mode}${finetune_suffix}"
 
+    # Append experiment id suffix if provided
+    if [ -n "$EXPERIMENT_ID_SUFFIX" ]; then
+        base_experiment_id="${base_experiment_id}_${EXPERIMENT_ID_SUFFIX}"
+    fi
+
     if [ "${variant_name}" = "default" ]; then
         printf '%s\n' "${base_experiment_id}"
         return 0
