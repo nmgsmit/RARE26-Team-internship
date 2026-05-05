@@ -51,4 +51,4 @@ PY
 fi
 
 # Run training
-/bin/bash ./main.sh
+/bin/bash ./pipeline.sh
