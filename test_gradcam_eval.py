@@ -19,7 +19,9 @@ from gradcam import (
 from roi_guidance import (
     build_roi_record_from_cam,
     compute_normalized_bbox_from_binary_mask,
+    load_roi_records_from_json,
     load_roi_records_from_masks,
+    save_roi_records_to_json,
 )
 from testdata import build_barrett_gradcam_samples
 
@@ -213,6 +215,27 @@ class RoiGuidanceTests(unittest.TestCase):
             self.assertEqual(matched_images, [str(image_path)])
             self.assertEqual(unmatched_images, [])
             self.assertEqual(roi_records[str(image_path)]["source"], "mask")
+
+    def test_roi_records_json_round_trip_preserves_bbox_and_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            json_path = Path(tmpdir) / "train_rois.json"
+            roi_records = {
+                "image_a.png": {
+                    "bbox": (0.1, 0.2, 0.9, 0.8),
+                    "coverage": 0.25,
+                    "score": 0.91,
+                    "source": "gradcam",
+                }
+            }
+            metadata = {"checkpoint": "model.pt", "roi_records_total": 1}
+
+            save_roi_records_to_json(json_path, roi_records, metadata=metadata)
+            loaded_records, loaded_metadata = load_roi_records_from_json(json_path)
+
+            self.assertEqual(loaded_metadata, metadata)
+            self.assertEqual(loaded_records["image_a.png"]["bbox"], roi_records["image_a.png"]["bbox"])
+            self.assertEqual(loaded_records["image_a.png"]["source"], "gradcam")
+            self.assertAlmostEqual(loaded_records["image_a.png"]["score"], 0.91, places=6)
 
     def test_two_view_dataset_replaces_second_view_with_roi_crop(self):
         with tempfile.TemporaryDirectory() as tmpdir:

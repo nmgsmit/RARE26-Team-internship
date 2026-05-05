@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import numpy as np
@@ -146,6 +147,59 @@ def load_roi_records_from_masks(image_paths, masks_dir):
         matched_images.append(str(image_path))
 
     return roi_records, matched_images, unmatched_images
+
+
+def _normalize_roi_record(record):
+    normalized_record = dict(record)
+    bbox = normalized_record.get("bbox")
+    if bbox is None or len(bbox) != 4:
+        raise ValueError(f"ROI record is missing a valid bbox: {record}")
+    normalized_record["bbox"] = tuple(float(value) for value in bbox)
+    if "coverage" in normalized_record:
+        normalized_record["coverage"] = float(normalized_record["coverage"])
+    if "score" in normalized_record:
+        normalized_record["score"] = float(normalized_record["score"])
+    if "source" in normalized_record:
+        normalized_record["source"] = str(normalized_record["source"])
+    return normalized_record
+
+
+def save_roi_records_to_json(path, roi_records, metadata=None):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    serialized_records = {}
+    for image_path, record in roi_records.items():
+        normalized_record = _normalize_roi_record(record)
+        serialized_record = dict(normalized_record)
+        serialized_record["bbox"] = list(normalized_record["bbox"])
+        serialized_records[str(image_path)] = serialized_record
+
+    payload = {
+        "metadata": dict(metadata or {}),
+        "roi_records": serialized_records,
+    }
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+
+
+def load_roi_records_from_json(path):
+    path = Path(path)
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+
+    if isinstance(payload, dict) and "roi_records" in payload:
+        raw_records = payload.get("roi_records", {})
+        metadata = payload.get("metadata", {})
+    else:
+        raw_records = payload
+        metadata = {}
+
+    roi_records = {
+        str(image_path): _normalize_roi_record(record)
+        for image_path, record in dict(raw_records).items()
+    }
+    return roi_records, dict(metadata)
 
 
 def crop_image_to_roi(

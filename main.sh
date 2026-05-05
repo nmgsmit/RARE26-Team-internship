@@ -20,6 +20,7 @@ SEED="${SEED:-42}"
 # Optional Grad-CAM ROI-guided finetuning.
 ENABLE_ROI_GUIDANCE="${ENABLE_ROI_GUIDANCE:-0}"
 RUN_COMPARISON_BASELINE="${RUN_COMPARISON_BASELINE:-0}"
+PRETRAIN_ROI_RECORDS_PATH="${PRETRAIN_ROI_RECORDS_PATH:-}"
 ROI_START_EPOCH="${ROI_START_EPOCH:-20}"
 ROI_FOCUS_PROB="${ROI_FOCUS_PROB:-1.0}"
 ROI_CONTEXT_SCALE="${ROI_CONTEXT_SCALE:-2.0}"
@@ -113,6 +114,10 @@ build_common_args() {
 
     if [ "${backbone}" = "gastronet" ]; then
         args+=(--backbone-weights-path "${GASTRONET_CKPT}")
+    fi
+
+    if [ "${stage}" = "pretrain" ]; then
+        add_optional_arg args --roi-records-path "${PRETRAIN_ROI_RECORDS_PATH}"
     fi
 
     if [ "${stage}" = "finetune" ]; then

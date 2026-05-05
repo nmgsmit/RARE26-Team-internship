@@ -29,7 +29,7 @@ from model import (
     load_encoder_checkpoint,
     load_model_checkpoint,
 )
-from roi_guidance import build_roi_record_from_cam
+from roi_guidance import build_roi_record_from_cam, load_roi_records_from_json
 from testdata import load_barrett_gradcam_dataset, load_external_testset, load_segmentation_testset
 
 
@@ -342,6 +342,15 @@ def get_args_parser():
         ),
     )
     parser.add_argument(
+        "--roi-records-path",
+        type=str,
+        default=None,
+        help=(
+            "Optional path to saved ROI metadata JSON. When provided, the train split immediately "
+            "uses those ROIs to guide positive-sample crops. This is the path you use for ROI-guided pretraining."
+        ),
+    )
+    parser.add_argument(
         "--roi-start-epoch",
         type=int,
         default=20,
@@ -476,6 +485,11 @@ def resolve_runtime_config(args):
         raise ValueError(
             "Baseline and finetune stages only support supervised losses. "
             "Use --loss-name ce or --loss-name class-balanced."
+        )
+    if args.roi_guided_training and args.roi_records_path:
+        raise ValueError(
+            "--roi-guided-training and --roi-records-path are mutually exclusive. "
+            "Use saved ROI records for offline ROI-guided pretraining, or online Grad-CAM refresh for finetuning."
         )
     if args.finetune_train_mode is None:
         args.finetune_train_mode = "probe" if args.finetune_with_smote else "last_block"
@@ -812,6 +826,49 @@ def build_gradcam_roi_records(args, model, train_ds, device):
             model.train()
 
     return roi_records, len(image_paths)
+
+
+def activate_saved_train_roi_guidance(args, train_ds):
+    if not args.roi_records_path:
+        return None
+
+    roi_records, metadata = load_roi_records_from_json(args.roi_records_path)
+    train_image_paths = set(train_ds.df["img"].astype(str).tolist())
+    matched_records = {
+        image_path: record for image_path, record in roi_records.items() if image_path in train_image_paths
+    }
+    unmatched_record_count = len(roi_records) - len(matched_records)
+    train_ds.set_roi_records(matched_records, active=True)
+    dataset_stats = train_ds.get_roi_guidance_stats()
+
+    payload = {
+        "train/roi_records_loaded_total": len(roi_records),
+        "train/roi_records_loaded_matched": len(matched_records),
+        "train/roi_records_loaded_unmatched": unmatched_record_count,
+        "train/roi_positive_images": dataset_stats["roi_positive_images"],
+        "train/roi_positive_candidates": dataset_stats["roi_positive_candidates"],
+        "train/roi_mean_coverage": dataset_stats["roi_mean_coverage"],
+    }
+    payload.update(_flatten_roi_source_counts(dataset_stats["roi_source_counts"]))
+    wandb.log(payload, step=0)
+
+    metadata_checkpoint = metadata.get("checkpoint", "unknown")
+    print(
+        "Loaded saved ROI guidance | "
+        f"path={args.roi_records_path} | "
+        f"matched={len(matched_records)}/{len(roi_records)} | "
+        f"unmatched={unmatched_record_count} | "
+        f"roi positives={dataset_stats['roi_positive_images']}/{dataset_stats['roi_positive_candidates']} | "
+        f"sources={_format_roi_source_counts(dataset_stats['roi_source_counts'])} | "
+        f"checkpoint={metadata_checkpoint}"
+    )
+    return {
+        "records_total": len(roi_records),
+        "matched_records": len(matched_records),
+        "unmatched_records": unmatched_record_count,
+        "dataset_stats": dataset_stats,
+        "metadata": metadata,
+    }
 
 
 def refresh_train_roi_guidance(args, model, train_ds, device, epoch_index):
@@ -1910,7 +1967,10 @@ def run_smote_finetune(
 def main(args):
     args = resolve_runtime_config(args)
     if args.roi_guided_training and args.stage == "pretrain":
-        raise ValueError("--roi-guided-training is only supported for baseline or finetune stages.")
+        raise ValueError(
+            "--roi-guided-training is only supported for baseline or finetune stages. "
+            "Use --roi-records-path for ROI-guided pretraining with saved Grad-CAM crops."
+        )
 
     wandb.init(
         project=args.wandb_project,
@@ -1938,6 +1998,8 @@ def main(args):
     print(
         f"Classifier input: {args.classifier_input} | finetune train mode: {args.finetune_train_mode}"
     )
+    if args.roi_records_path:
+        print(f"Saved ROI guidance configured from {args.roi_records_path}")
     if args.roi_guided_training:
         print(
             "ROI-guided training configured | "
@@ -1955,6 +2017,8 @@ def main(args):
         validate_post_train_gradcam_dataset(args)
 
     train_loader, valid_loader, train_ds, _, class_names = prepare_datasets(args, device)
+    if args.roi_records_path:
+        activate_saved_train_roi_guidance(args, train_ds)
     testset_loader, _, testset_image_paths = load_external_testset(
         args.testset_images_dir,
         args.batch_size,

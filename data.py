@@ -150,6 +150,57 @@ def build_roi_focus_transform(input_size):
     ])
 
 
+def build_dataset_dataframe(data_dir):
+    centers = [
+        folder
+        for folder in os.listdir(data_dir)
+        if folder.startswith("center") and os.path.isdir(os.path.join(data_dir, folder))
+    ]
+    if not centers:
+        raise ValueError(f"No center folders found in {data_dir}.")
+
+    all_images = []
+    all_labels = []
+    all_centers = []
+    class_names = None
+
+    for center in centers:
+        center_path = os.path.join(data_dir, center)
+        ds = ImageFolder(root=center_path)
+
+        if ds.class_to_idx != {"ndbe": 0, "neo": 1}:
+            raise ValueError(f"Class mapping mismatch in {center}: {ds.class_to_idx}")
+
+        if class_names is None:
+            class_names = list(ds.class_to_idx.keys())
+
+        for img_path, label in ds.samples:
+            all_images.append(img_path)
+            all_labels.append(label)
+            all_centers.append(center)
+
+    df = pd.DataFrame({"img": all_images, "label": all_labels, "center": all_centers})
+    return df, class_names
+
+
+def build_train_val_dataframes(data_dir, test_size=0.2, random_state=42):
+    df, class_names = build_dataset_dataframe(data_dir)
+    split_df = df.copy()
+    split_df["stratify_col"] = (
+        split_df["center"].astype(str) + "_" + split_df["label"].astype(str)
+    )
+
+    train_df, val_df = train_test_split(
+        split_df,
+        test_size=test_size,
+        stratify=split_df["stratify_col"],
+        random_state=random_state,
+    )
+    train_df = train_df.drop(columns=["stratify_col"]).reset_index(drop=True)
+    val_df = val_df.drop(columns=["stratify_col"]).reset_index(drop=True)
+    return train_df, val_df, class_names
+
+
 def prepare_datasets(args, device):
     input_size = getattr(args, "input_size", 336)
     print(f"Using input size: {input_size}x{input_size}")
@@ -176,45 +227,7 @@ def prepare_datasets(args, device):
     ])
     train_roi_transform_2 = build_roi_focus_transform(input_size)
     valid_transform = build_eval_transform(input_size)
-
-    centers = [
-        folder
-        for folder in os.listdir(args.data_dir)
-        if folder.startswith("center") and os.path.isdir(os.path.join(args.data_dir, folder))
-    ]
-    if not centers:
-        raise ValueError(f"No center folders found in {args.data_dir}.")
-
-    all_images = []
-    all_labels = []
-    all_centers = []
-    class_names = None
-
-    for center in centers:
-        center_path = os.path.join(args.data_dir, center)
-        ds = ImageFolder(root=center_path)
-
-        if ds.class_to_idx != {"ndbe": 0, "neo": 1}:
-            raise ValueError(f"Class mapping mismatch in {center}: {ds.class_to_idx}")
-
-        if class_names is None:
-            class_names = list(ds.class_to_idx.keys())
-
-        for img_path, label in ds.samples:
-            all_images.append(img_path)
-            all_labels.append(label)
-            all_centers.append(center)
-
-    df = pd.DataFrame({"img": all_images, "label": all_labels, "center": all_centers})
-    df["stratify_col"] = df["center"].astype(str) + "_" + df["label"].astype(str)
-
-    train_df, val_df = train_test_split(
-        df,
-        test_size=0.2,
-        stratify=df["stratify_col"],
-        random_state=42,
-    )
-    val_df = val_df.reset_index(drop=True)
+    train_df, val_df, class_names = build_train_val_dataframes(args.data_dir)
 
     train_ds = TwoViewDataset(
         train_df,
