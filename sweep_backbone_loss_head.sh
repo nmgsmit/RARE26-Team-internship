@@ -73,7 +73,7 @@ for BACKBONE in "${BACKBONES[@]}"; do
             WARMUP_EPOCHS="${WARMUP_EPOCHS}" \
             SEED="${SEED}" \
             SAVE_DIR="${PRETRAIN_SAVE_DIR}" \
-            ./main.sh
+            /bin/bash ./main.sh
 
             PRETRAIN_CKPT="${PRETRAIN_SAVE_DIR}/${PRETRAIN_RUN_ID}_encoder.pt"
             if [ ! -f "${PRETRAIN_CKPT}" ]; then
@@ -109,7 +109,7 @@ for BACKBONE in "${BACKBONES[@]}"; do
             WARMUP_EPOCHS="${WARMUP_EPOCHS}" \
             SEED="${SEED}" \
             SAVE_DIR="${FINETUNE_SAVE_DIR}" \
-            ./main.sh
+            /bin/bash ./main.sh
         done
     done
 done
