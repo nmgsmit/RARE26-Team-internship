@@ -35,6 +35,10 @@ export HF_HOME="${HF_HOME:-/scratch-shared/${USER}/hf_cache}"
 export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
 mkdir -p "${HF_HOME}" "${HF_HUB_CACHE}"
 
+# Git clones and worktrees on shared systems do not always preserve executable bits reliably.
+# Make the entrypoint scripts runnable before launching the pipeline.
+chmod +x ./jobscript_slurm.sh ./pipeline.sh ./main.sh
+
 TIMM_PRELOAD_MODEL="${TIMM_PRELOAD_MODEL:-}"
 
 # Download timm pretrained weights ahead of time when the selected run needs them.
