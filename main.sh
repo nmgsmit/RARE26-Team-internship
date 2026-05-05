@@ -3,7 +3,8 @@
 set -euo pipefail
 
 # Fill these in first for new runs.
-EXPERIMENT_ID_PREFIX="${EXPERIMENT_ID_PREFIX:-}"
+# This tag is added in front of the auto-generated stage/backbone experiment ids.
+EXPERIMENT_ID="${EXPERIMENT_ID:-${EXPERIMENT_ID_PREFIX:-}}"
 WANDB_GROUP="${WANDB_GROUP:-supcon}"
 
 # Crucial model choices.
@@ -25,10 +26,6 @@ LR="${LR:-1e-4}"
 WARMUP_EPOCHS="${WARMUP_EPOCHS:-3}"
 SEED="${SEED:-42}"
 
-# Optional local overrides: leave blank unless you need them.
-CLASSIFIER_INPUT="${CLASSIFIER_INPUT:-}"
-FINETUNE_TRAIN_MODE="${FINETUNE_TRAIN_MODE:-}"
-
 # Shared paths and runtime defaults: these usually stay fixed across runs.
 DATA_DIR="${DATA_DIR:-../data/Challenge_train_data}"
 TESTSET_IMAGES_DIR="${TESTSET_IMAGES_DIR:-../data/EVC_Barretts_FullSet/images}"
@@ -47,15 +44,6 @@ if [ -n "${PRETRAIN_CHECKPOINT}" ] && [ "${#BACKBONES[@]}" -gt 1 ]; then
 fi
 
 mkdir -p "${SAVE_DIR}"
-
-add_optional_arg() {
-    local -n ref_args=$1
-    local flag="$2"
-    local value="$3"
-    if [ -n "${value}" ]; then
-        ref_args+=("${flag}" "${value}")
-    fi
-}
 
 build_common_args() {
     local stage="$1"
@@ -83,9 +71,6 @@ build_common_args() {
         --save-dir "${SAVE_DIR}"
     )
 
-    add_optional_arg args --classifier-input "${CLASSIFIER_INPUT}"
-    add_optional_arg args --finetune-train-mode "${FINETUNE_TRAIN_MODE}"
-
     if [ "${backbone}" = "gastronet" ]; then
         args+=(--backbone-weights-path "${GASTRONET_CKPT}")
     fi
@@ -106,8 +91,8 @@ run_python_train() {
 
 build_experiment_id() {
     local base_id="$1"
-    if [ -n "${EXPERIMENT_ID_PREFIX}" ]; then
-        printf '%s_%s\n' "${EXPERIMENT_ID_PREFIX}" "${base_id}"
+    if [ -n "${EXPERIMENT_ID}" ]; then
+        printf '%s_%s\n' "${EXPERIMENT_ID}" "${base_id}"
     else
         printf '%s\n' "${base_id}"
     fi
