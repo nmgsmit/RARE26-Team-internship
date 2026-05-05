@@ -296,7 +296,7 @@ for backbone in "${BACKBONES[@]}"; do
     fi
 
     if [ "${ENABLE_ROI_GUIDANCE}" = "1" ]; then
-        run_finetune_variant "${backbone}" "${encoder_ckpt}" "${finetune_suffix}" "roi_start${ROI_START_EPOCH}" "1"
+        run_finetune_variant "${backbone}" "${encoder_ckpt}" "${finetune_suffix}" "ROIrun" "1"
     elif [ "${RUN_COMPARISON_BASELINE}" != "1" ]; then
         run_finetune_variant "${backbone}" "${encoder_ckpt}" "${finetune_suffix}" "default" "0"
     fi
