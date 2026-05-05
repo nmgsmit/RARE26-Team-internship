@@ -3,9 +3,11 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from PIL import Image
 import torch
 
+from data import TwoViewDataset
 from gradcam import (
     _compute_cam_activation_stats,
     _overlay_soft_consensus,
@@ -13,6 +15,11 @@ from gradcam import (
     build_expert_consensus_masks,
     compute_soft_mask_mass,
     compute_pixel_average_precision,
+)
+from roi_guidance import (
+    build_roi_record_from_cam,
+    compute_normalized_bbox_from_binary_mask,
+    load_roi_records_from_masks,
 )
 from testdata import build_barrett_gradcam_samples
 
@@ -159,6 +166,88 @@ class BarrettGroupingTests(unittest.TestCase):
             self.assertEqual(qa_stats["annotations_per_image_max"], 5)
             self.assertEqual(samples[0]["mask_paths"][0].name, "pat01_im1_ACHD_exp1.bmp")
             self.assertEqual(samples[0]["mask_paths"][-1].name, "pat01_im1_ACHD_exp5.bmp")
+
+
+class RoiGuidanceTests(unittest.TestCase):
+    def test_compute_normalized_bbox_from_binary_mask(self):
+        mask = np.zeros((4, 4), dtype=np.uint8)
+        mask[1:3, 2:4] = 1
+
+        bbox = compute_normalized_bbox_from_binary_mask(mask)
+
+        self.assertEqual(bbox, (0.5, 0.25, 1.0, 0.75))
+
+    def test_build_roi_record_from_cam_uses_thresholded_hot_region(self):
+        cam = np.array([
+            [0.1, 0.1, 0.1, 0.1],
+            [0.1, 0.9, 0.9, 0.1],
+            [0.1, 0.9, 0.9, 0.1],
+            [0.1, 0.1, 0.1, 0.1],
+        ], dtype=np.float32)
+
+        roi_record = build_roi_record_from_cam(cam, threshold=0.6, score=0.87)
+
+        self.assertIsNotNone(roi_record)
+        self.assertEqual(roi_record["source"], "gradcam")
+        self.assertAlmostEqual(roi_record["score"], 0.87, places=6)
+        self.assertEqual(roi_record["bbox"], (0.25, 0.25, 0.75, 0.75))
+
+    def test_load_roi_records_from_masks_matches_training_images(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            masks_dir = root / "masks"
+            masks_dir.mkdir()
+            image_path = root / "case01_ACHD.png"
+            Image.fromarray(np.zeros((8, 8, 3), dtype=np.uint8), mode="RGB").save(image_path)
+
+            mask = np.zeros((8, 8), dtype=np.uint8)
+            mask[2:6, 1:5] = 255
+            Image.fromarray(mask, mode="L").save(masks_dir / "case01_ACHD_mask.png")
+
+            roi_records, matched_images, unmatched_images = load_roi_records_from_masks(
+                [image_path],
+                masks_dir,
+            )
+
+            self.assertEqual(len(roi_records), 1)
+            self.assertEqual(matched_images, [str(image_path)])
+            self.assertEqual(unmatched_images, [])
+            self.assertEqual(roi_records[str(image_path)]["source"], "mask")
+
+    def test_two_view_dataset_replaces_second_view_with_roi_crop(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            image_path = Path(tmpdir) / "case01_ACHD.png"
+            image = np.zeros((10, 10, 3), dtype=np.uint8)
+            image[3:7, 3:7] = 255
+            Image.fromarray(image, mode="RGB").save(image_path)
+
+            df = pd.DataFrame({"img": [str(image_path)], "label": [1]})
+            dataset = TwoViewDataset(
+                df,
+                transform1=lambda image: image.size,
+                transform2=lambda image: image.size,
+                roi_transform2=lambda image: image.size,
+                roi_focus_prob=1.0,
+                roi_context_scale=1.0,
+                roi_min_crop_scale=0.1,
+                roi_center_jitter=0.0,
+            )
+            dataset.set_roi_records(
+                {
+                    str(image_path): {
+                        "bbox": (0.3, 0.3, 0.7, 0.7),
+                        "coverage": 0.16,
+                        "score": 1.0,
+                        "source": "mask",
+                    }
+                }
+            )
+
+            view1_size, view2_size, label = dataset[0]
+
+            self.assertEqual(label, 1)
+            self.assertEqual(view1_size, (10, 10))
+            self.assertEqual(view2_size, (4, 4))
 
 
 if __name__ == "__main__":

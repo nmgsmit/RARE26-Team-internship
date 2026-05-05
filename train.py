@@ -12,7 +12,11 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, SequentialLR
 from torch.utils.data import DataLoader, TensorDataset
 
 from data import SimpleDataset, build_eval_transform, prepare_datasets
-from gradcam import evaluate_gradcam_barrett_dataset, evaluate_gradcam_segmentation_dataset
+from gradcam import (
+    compute_vit_gradcam_batch,
+    evaluate_gradcam_barrett_dataset,
+    evaluate_gradcam_segmentation_dataset,
+)
 from metrics import (
     collect_scores,
     compute_group_eval_metrics,
@@ -25,6 +29,7 @@ from model import (
     load_encoder_checkpoint,
     load_model_checkpoint,
 )
+from roi_guidance import build_roi_record_from_cam
 from testdata import load_barrett_gradcam_dataset, load_external_testset, load_segmentation_testset
 
 
@@ -328,6 +333,56 @@ def get_args_parser():
     parser.add_argument("--gradcam-threshold", type=float, default=0.5)
     parser.add_argument("--gradcam-log-samples", type=int, default=10)
     parser.add_argument("--gradcam-eval-every", type=int, default=1)
+    parser.add_argument(
+        "--roi-guided-training",
+        action="store_true",
+        help=(
+            "After a warmup period, replace the second training view of positive samples with "
+            "an ROI-focused crop extracted from Grad-CAM."
+        ),
+    )
+    parser.add_argument(
+        "--roi-start-epoch",
+        type=int,
+        default=20,
+        help="Activate ROI-guided training after this many full epochs have completed.",
+    )
+    parser.add_argument(
+        "--roi-focus-prob",
+        type=float,
+        default=1.0,
+        help="Probability of replacing the second positive training view with an ROI-focused crop.",
+    )
+    parser.add_argument(
+        "--roi-context-scale",
+        type=float,
+        default=2.0,
+        help="Context multiplier applied around the ROI box before resizing to the training input size.",
+    )
+    parser.add_argument(
+        "--roi-min-crop-scale",
+        type=float,
+        default=0.4,
+        help="Minimum normalized crop size used for ROI-focused crops.",
+    )
+    parser.add_argument(
+        "--roi-center-jitter",
+        type=float,
+        default=0.05,
+        help="Random center jitter applied to ROI-focused crops as a fraction of crop width and height.",
+    )
+    parser.add_argument(
+        "--roi-gradcam-threshold",
+        type=float,
+        default=0.6,
+        help="Threshold applied to normalized Grad-CAM heatmaps when extracting pseudo-ROI boxes.",
+    )
+    parser.add_argument(
+        "--roi-gradcam-min-prob",
+        type=float,
+        default=0.5,
+        help="Minimum positive-class probability required before a Grad-CAM pseudo-ROI is accepted.",
+    )
     parser.add_argument(
         "--gradcam-skip-empty-masks",
         dest="gradcam_skip_empty_masks",
@@ -691,6 +746,112 @@ def run_post_training_gradcam(args, model, device, final_save_path, best_save_pa
             f"Scored: {segmentation_payload['segmentation/dice_scored_samples']} | "
             f"Skipped empty: {segmentation_payload['segmentation/dice_skipped_empty_masks']}"
         )
+
+
+def _flatten_roi_source_counts(source_counts):
+    return {f"train/roi_source_{source}_count": count for source, count in sorted(source_counts.items())}
+
+
+def _format_roi_source_counts(source_counts):
+    if not source_counts:
+        return "none"
+    return ", ".join(f"{source}={count}" for source, count in sorted(source_counts.items()))
+
+
+def build_gradcam_roi_records(args, model, train_ds, device):
+    positive_df = train_ds.df.loc[train_ds.df["label"] == args.gradcam_target_class].copy()
+    positive_df["img"] = positive_df["img"].astype(str)
+
+    if positive_df.empty:
+        return {}, 0
+
+    eval_ds = SimpleDataset(positive_df, build_eval_transform(args.input_size))
+    eval_loader = DataLoader(
+        eval_ds,
+        batch_size=args.gradcam_batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=(device.type == "cuda"),
+    )
+
+    roi_records = {}
+    image_paths = positive_df["img"].tolist()
+    path_offset = 0
+    was_training = model.training
+    model.eval()
+
+    try:
+        for images, _labels in eval_loader:
+            batch_paths = image_paths[path_offset:path_offset + images.size(0)]
+            path_offset += images.size(0)
+            images = images.to(device)
+
+            cams, probs = compute_vit_gradcam_batch(
+                model=model,
+                images=images,
+                target_class=args.gradcam_target_class,
+            )
+            cams = cams.detach().cpu()
+            probs = probs.detach().cpu()
+
+            for image_path, cam, prob in zip(batch_paths, cams, probs):
+                positive_prob = float(prob.item())
+                if positive_prob < args.roi_gradcam_min_prob:
+                    continue
+
+                roi_record = build_roi_record_from_cam(
+                    cam.numpy(),
+                    threshold=args.roi_gradcam_threshold,
+                    score=positive_prob,
+                )
+                if roi_record is None:
+                    continue
+                roi_records[str(image_path)] = roi_record
+    finally:
+        if was_training:
+            model.train()
+
+    return roi_records, len(image_paths)
+
+
+def refresh_train_roi_guidance(args, model, train_ds, device, epoch_index):
+    if args.stage == "pretrain":
+        raise ValueError("ROI-guided training is only supported for baseline or finetune stages.")
+
+    gradcam_records, gradcam_candidates = build_gradcam_roi_records(
+        args,
+        model,
+        train_ds,
+        device,
+    )
+    train_ds.set_roi_records(gradcam_records, active=True)
+    dataset_stats = train_ds.get_roi_guidance_stats()
+
+    payload = {
+        "train/roi_epoch_activated": epoch_index + 1,
+        "train/roi_records_total": len(gradcam_records),
+        "train/roi_records_gradcam": len(gradcam_records),
+        "train/roi_gradcam_candidates": gradcam_candidates,
+        "train/roi_positive_images": dataset_stats["roi_positive_images"],
+        "train/roi_positive_candidates": dataset_stats["roi_positive_candidates"],
+        "train/roi_mean_coverage": dataset_stats["roi_mean_coverage"],
+    }
+    payload.update(_flatten_roi_source_counts(dataset_stats["roi_source_counts"]))
+    wandb.log(payload, step=epoch_index + 1)
+
+    print(
+        "Activated ROI-guided training | "
+        f"epoch={epoch_index + 1} | "
+        f"roi positives={dataset_stats['roi_positive_images']}/{dataset_stats['roi_positive_candidates']} | "
+        f"sources={_format_roi_source_counts(dataset_stats['roi_source_counts'])} | "
+        f"gradcam accepted={len(gradcam_records)}/{gradcam_candidates}"
+    )
+    return {
+        "records_total": len(gradcam_records),
+        "gradcam_records": len(gradcam_records),
+        "gradcam_candidates": gradcam_candidates,
+        "dataset_stats": dataset_stats,
+    }
 
 
 class EnergyMLP(nn.Module):
@@ -1608,6 +1769,7 @@ def run_smote_finetune(
     best_valid_projected_ppv = float("-inf")
     best_valid_fpr = float("inf")
     smote_payload = {f"smote/{key}": value for key, value in smote_diagnostics.items()}
+    roi_refresh_state = {"completed": False}
 
     warmstart_criterion = build_supervised_criterion_from_labels(
         args.loss_name,
@@ -1695,6 +1857,10 @@ def run_smote_finetune(
     image_scheduler = build_finetune_scheduler(image_optimizer, args.epochs)
 
     for epoch in range(args.epochs):
+        if args.roi_guided_training and not roi_refresh_state["completed"] and epoch >= args.roi_start_epoch:
+            refresh_train_roi_guidance(args, model, train_ds, device, epoch)
+            roi_refresh_state["completed"] = True
+
         model.train()
         train_loss = 0.0
         train_correct = 0
@@ -1743,6 +1909,9 @@ def run_smote_finetune(
 
 def main(args):
     args = resolve_runtime_config(args)
+    if args.roi_guided_training and args.stage == "pretrain":
+        raise ValueError("--roi-guided-training is only supported for baseline or finetune stages.")
+
     wandb.init(
         project=args.wandb_project,
         group=args.wandb_group,
@@ -1769,6 +1938,13 @@ def main(args):
     print(
         f"Classifier input: {args.classifier_input} | finetune train mode: {args.finetune_train_mode}"
     )
+    if args.roi_guided_training:
+        print(
+            "ROI-guided training configured | "
+            f"activation after {args.roi_start_epoch} epochs | "
+            f"gradcam threshold={args.roi_gradcam_threshold} | "
+            f"min positive prob={args.roi_gradcam_min_prob}"
+        )
     if args.stage == "pretrain":
         print(
             "Pretrain mode only learns the backbone and projection head. "
@@ -1882,8 +2058,13 @@ def main(args):
     best_valid_fpr = float("inf")
     best_save_path = os.path.join(args.save_dir, f"{args.experiment_id}_best.pt")
     final_save_path = os.path.join(args.save_dir, f"{args.experiment_id}_final.pt")
+    roi_refresh_state = {"completed": False}
 
     for epoch in range(args.epochs):
+        if args.roi_guided_training and not roi_refresh_state["completed"] and epoch >= args.roi_start_epoch:
+            refresh_train_roi_guidance(args, model, train_ds, device, epoch)
+            roi_refresh_state["completed"] = True
+
         model.train()
         train_loss = 0.0
         train_ce = 0.0

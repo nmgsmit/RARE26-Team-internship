@@ -17,6 +17,17 @@ LR="${LR:-1e-4}"
 WARMUP_EPOCHS="${WARMUP_EPOCHS:-3}"
 SEED="${SEED:-42}"
 
+# Optional Grad-CAM ROI-guided finetuning.
+ENABLE_ROI_GUIDANCE="${ENABLE_ROI_GUIDANCE:-0}"
+RUN_COMPARISON_BASELINE="${RUN_COMPARISON_BASELINE:-0}"
+ROI_START_EPOCH="${ROI_START_EPOCH:-20}"
+ROI_FOCUS_PROB="${ROI_FOCUS_PROB:-1.0}"
+ROI_CONTEXT_SCALE="${ROI_CONTEXT_SCALE:-2.0}"
+ROI_MIN_CROP_SCALE="${ROI_MIN_CROP_SCALE:-0.4}"
+ROI_CENTER_JITTER="${ROI_CENTER_JITTER:-0.05}"
+ROI_GRADCAM_THRESHOLD="${ROI_GRADCAM_THRESHOLD:-0.6}"
+ROI_GRADCAM_MIN_PROB="${ROI_GRADCAM_MIN_PROB:-0.5}"
+
 # Head architecture details.
 HEAD_HIDDEN_DIM="${HEAD_HIDDEN_DIM:-}"
 HEAD_DROPOUT="${HEAD_DROPOUT:-0.0}"
@@ -71,6 +82,7 @@ build_common_args() {
     local loss_name="$3"
     local experiment_id="$4"
     local epochs="$5"
+    local enable_roi="${6:-0}"
 
     local args=(
         --stage "${stage}"
@@ -105,6 +117,18 @@ build_common_args() {
 
     if [ "${stage}" = "finetune" ]; then
         args+=(--post-train-gradcam --post-train-gradcam-dataset-root "${POST_TRAIN_GRADCAM_DATASET_ROOT}")
+        if [ "${enable_roi}" = "1" ]; then
+            args+=(
+                --roi-guided-training
+                --roi-start-epoch "${ROI_START_EPOCH}"
+                --roi-focus-prob "${ROI_FOCUS_PROB}"
+                --roi-context-scale "${ROI_CONTEXT_SCALE}"
+                --roi-min-crop-scale "${ROI_MIN_CROP_SCALE}"
+                --roi-center-jitter "${ROI_CENTER_JITTER}"
+                --roi-gradcam-threshold "${ROI_GRADCAM_THRESHOLD}"
+                --roi-gradcam-min-prob "${ROI_GRADCAM_MIN_PROB}"
+            )
+        fi
     fi
 
     printf '%s\n' "${args[@]}"
@@ -142,6 +166,9 @@ build_finetune_suffix() {
     local suffix=""
     if [ "${ENABLE_SMOTE}" = "1" ]; then
         suffix="_${SMOTE_FEATURE_SPACE}_smote"
+        if [ -n "${SMOTE_SYNTHETIC_RATIO:-}" ]; then
+            suffix="${suffix}_r${SMOTE_SYNTHETIC_RATIO}"
+        fi
         if [ "${FINETUNE_TRAIN_MODE:-probe}" != "probe" ]; then
             suffix="${suffix}_warmstart_${FINETUNE_TRAIN_MODE:-last_block}"
         fi
@@ -156,6 +183,23 @@ build_finetune_suffix() {
         fi
     fi
     printf '%s\n' "${suffix}"
+}
+
+build_finetune_variant_experiment_id() {
+    local backbone="$1"
+    local finetune_suffix="$2"
+    local variant_name="$3"
+
+    local resolved_classifier_input="${CLASSIFIER_INPUT:-pooled}"
+    local resolved_finetune_train_mode="${FINETUNE_TRAIN_MODE:-last_block}"
+    local base_experiment_id="${backbone}_finetune_${PRETRAIN_LOSS}_${FINETUNE_LOSS}_${HEAD_TYPE}_${resolved_classifier_input}_${resolved_finetune_train_mode}${finetune_suffix}"
+
+    if [ "${variant_name}" = "default" ]; then
+        printf '%s\n' "${base_experiment_id}"
+        return 0
+    fi
+
+    printf '%s_%s\n' "${base_experiment_id}" "${variant_name}"
 }
 
 append_smote_args() {
@@ -207,6 +251,25 @@ append_smote_args() {
     fi
 }
 
+run_finetune_variant() {
+    local backbone="$1"
+    local encoder_ckpt="$2"
+    local finetune_suffix="$3"
+    local variant_name="$4"
+    local enable_roi="$5"
+
+    local finetune_experiment_id
+    finetune_experiment_id="$(build_finetune_variant_experiment_id "${backbone}" "${finetune_suffix}" "${variant_name}")"
+    mapfile -t finetune_args < <(
+        build_common_args "finetune" "${backbone}" "${FINETUNE_LOSS}" "${finetune_experiment_id}" "${FINETUNE_EPOCHS}" "${enable_roi}"
+    )
+    finetune_args+=(--encoder-ckpt "${encoder_ckpt}")
+    if [ "${ENABLE_SMOTE}" = "1" ]; then
+        append_smote_args finetune_args
+    fi
+    run_python_train "${finetune_args[@]}"
+}
+
 for backbone in "${BACKBONES[@]}"; do
     pretrain_experiment_id="${backbone}_pretrain_${PRETRAIN_LOSS}"
     encoder_ckpt="${SAVE_DIR}/${pretrain_experiment_id}_encoder.pt"
@@ -228,13 +291,13 @@ for backbone in "${BACKBONES[@]}"; do
     fi
 
     finetune_suffix="$(build_finetune_suffix)"
-    finetune_experiment_id="${backbone}_finetune_${PRETRAIN_LOSS}_${FINETUNE_LOSS}_${HEAD_TYPE}${finetune_suffix}"
-    mapfile -t finetune_args < <(
-        build_common_args "finetune" "${backbone}" "${FINETUNE_LOSS}" "${finetune_experiment_id}" "${FINETUNE_EPOCHS}"
-    )
-    finetune_args+=(--encoder-ckpt "${encoder_ckpt}")
-    if [ "${ENABLE_SMOTE}" = "1" ]; then
-        append_smote_args finetune_args
+    if [ "${RUN_COMPARISON_BASELINE}" = "1" ]; then
+        run_finetune_variant "${backbone}" "${encoder_ckpt}" "${finetune_suffix}" "baseline_exact" "0"
     fi
-    run_python_train "${finetune_args[@]}"
+
+    if [ "${ENABLE_ROI_GUIDANCE}" = "1" ]; then
+        run_finetune_variant "${backbone}" "${encoder_ckpt}" "${finetune_suffix}" "roi_start${ROI_START_EPOCH}" "1"
+    elif [ "${RUN_COMPARISON_BASELINE}" != "1" ]; then
+        run_finetune_variant "${backbone}" "${encoder_ckpt}" "${finetune_suffix}" "default" "0"
+    fi
 done
