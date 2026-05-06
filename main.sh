@@ -14,6 +14,8 @@ BACKBONES_CSV="${BACKBONES_CSV:-gastronet,dinov3}"
 PRETRAIN_LOSS="${PRETRAIN_LOSS:-suppro}"
 FINETUNE_LOSS="${FINETUNE_LOSS:-class-balanced}"
 HEAD_TYPE="${HEAD_TYPE:-linear}"
+TEMPERATURE="${TEMPERATURE:-0.07}"
+BASE_TEMPERATURE="${BASE_TEMPERATURE:-0.07}"
 
 # Checkpoint control. Leave PRETRAIN_CHECKPOINT blank to auto-detect one.
 PRETRAIN_CHECKPOINT="${PRETRAIN_CHECKPOINT:-}"
@@ -71,6 +73,8 @@ build_common_args() {
         --num-workers "${NUM_WORKERS}"
         --seed "${SEED}"
         --save-dir "${SAVE_DIR}"
+        --temperature "${TEMPERATURE}"
+        --base-temperature "${BASE_TEMPERATURE}"
     )
 
     if [ "${backbone}" = "gastronet" ]; then
