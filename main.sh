@@ -29,9 +29,9 @@ WARMUP_EPOCHS="${WARMUP_EPOCHS:-3}"
 SEED="${SEED:-42}"
 
 # Shared paths and runtime defaults: these usually stay fixed across runs.
-DATA_DIR="${DATA_DIR:-../data/Challenge_train_data}"
-TESTSET_IMAGES_DIR="${TESTSET_IMAGES_DIR:-../data/EVC_Barretts_FullSet/images}"
-POST_TRAIN_GRADCAM_DATASET_ROOT="${POST_TRAIN_GRADCAM_DATASET_ROOT:-../data/EVC_Barretts_FullSet}"
+DATA_DIR="${DATA_DIR:-./data/Challenge_train_data}"
+TESTSET_IMAGES_DIR="${TESTSET_IMAGES_DIR:-./data/EVC_Barretts_FullSet/images}"
+POST_TRAIN_GRADCAM_DATASET_ROOT="${POST_TRAIN_GRADCAM_DATASET_ROOT:-./data/EVC_Barretts_FullSet}"
 SAVE_DIR="${SAVE_DIR:-./checkpoints/linear_suppro_dual_backbone}"
 WANDB_PROJECT="${WANDB_PROJECT:-RARE25-Project}"
 NUM_WORKERS="${NUM_WORKERS:-10}"
