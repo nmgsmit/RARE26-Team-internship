@@ -312,7 +312,7 @@ def resolve_runtime_config(args):
     return args
 
 
-def suppro_loss(features, labels, temperature=0.07, base_temperature=0.07, class_weights=None):
+def suppro_loss(features, labels, temperature, base_temperature, class_weights=None):
     features = F.normalize(features, dim=-1)
     device = features.device
     _, views, _ = features.shape
