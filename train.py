@@ -482,10 +482,8 @@ def configure_stage(model, args):
             parameter.requires_grad = True
             
         optimizer = SGD(
-            [
-                {"params": model.backbone.parameters(), "lr": args.lr},
-                {"params": model.proj_head.parameters(), "lr": 1e-4} 
-            ],
+            list(model.backbone.parameters()) + list(model.proj_head.parameters()),
+            lr=args.lr,
             momentum=0.9,
             weight_decay=1e-4,
         )
@@ -501,28 +499,20 @@ def configure_stage(model, args):
 
         for parameter in model.backbone.parameters():
             parameter.requires_grad = False
-        if hasattr(model.backbone, "blocks") and len(model.backbone.blocks) > 0:
-            for parameter in model.backbone.blocks[-1].parameters():
-                parameter.requires_grad = True
-        else:
-            print("[WARN] backbone has no .blocks attribute; keeping the backbone frozen.")
-
         for parameter in model.proj_head.parameters():
             parameter.requires_grad = False
         for parameter in model.cls_head.parameters():
             parameter.requires_grad = True
 
-        unfrozen_backbone_params = [p for p in model.backbone.parameters() if p.requires_grad]
+        optimizer = SGD(
+            model.cls_head.parameters(),
+            lr=3e-4,
+            momentum=0.9,
+            weight_decay=1e-4
+        )
         
-        param_groups = []
-        if unfrozen_backbone_params:
-            param_groups.append({"params": unfrozen_backbone_params, "lr": args.lr})
-            
-        param_groups.append({"params": model.cls_head.parameters(), "lr": 1e-4})
-
-        optimizer = AdamW(param_groups, weight_decay=0.0)
+        scheduler = None
         
-        scheduler = build_finetune_scheduler(optimizer, args.epochs)
         return optimizer, scheduler
 
     raise ValueError(f"Unknown stage: {args.stage}")
