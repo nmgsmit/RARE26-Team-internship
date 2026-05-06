@@ -480,11 +480,12 @@ def configure_stage(model, args):
             parameter.requires_grad = True
         for parameter in model.proj_head.parameters():
             parameter.requires_grad = True
-        for parameter in model.cls_head.parameters():
-            parameter.requires_grad = False
+            
         optimizer = SGD(
-            list(model.backbone.parameters()) + list(model.proj_head.parameters()),
-            lr=args.lr,
+            [
+                {"params": model.backbone.parameters(), "lr": args.lr},
+                {"params": model.proj_head.parameters(), "lr": 1e-4} 
+            ],
             momentum=0.9,
             weight_decay=1e-4,
         )
@@ -511,10 +512,16 @@ def configure_stage(model, args):
         for parameter in model.cls_head.parameters():
             parameter.requires_grad = True
 
-        optimizer = AdamW(
-            [parameter for parameter in model.parameters() if parameter.requires_grad],
-            lr=args.lr,
-        )
+        unfrozen_backbone_params = [p for p in model.backbone.parameters() if p.requires_grad]
+        
+        param_groups = []
+        if unfrozen_backbone_params:
+            param_groups.append({"params": unfrozen_backbone_params, "lr": args.lr})
+            
+        param_groups.append({"params": model.cls_head.parameters(), "lr": 1e-4})
+
+        optimizer = AdamW(param_groups, weight_decay=0.0)
+        
         scheduler = build_finetune_scheduler(optimizer, args.epochs)
         return optimizer, scheduler
 
