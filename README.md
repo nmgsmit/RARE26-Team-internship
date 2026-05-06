@@ -4,13 +4,13 @@ This repository contains code and resources for the Team Internship project as p
 
 Example run command:
 
-EXPERIMENT_ID=lin_lr1em6_temp01 \
+EXPERIMENT_ID=mlpfw_lr1em6_temp05 \
 BACKBONES_CSV=gastronet \
-HEAD_TYPE=linear \
+HEAD_TYPE=mlp_fullwidth \
 PRETRAIN_LOSS=suppro \
 LR=1e-6 \
-TEMPERATURE=0.1 \
-BASE_TEMPERATURE=0.1 \
+TEMPERATURE=0.5 \
+BASE_TEMPERATURE=0.5 \
 PRETRAIN_EPOCHS=50 \
 BATCH_SIZE=32 \
-sbatch --export=EXPERIMENT_ID,BACKBONES_CSV,HEAD_TYPE,PRETRAIN_LOSS,LR,TEMPERATURE,LAMBDA_SUPPRO,LAMBDA_SUPMIN,PRETRAIN_EPOCHS,BATCH_SIZE jobscript_slurm.sh
+sbatch jobscript_slurm.sh
