@@ -19,7 +19,7 @@ from torchvision.transforms.v2 import (
     ToImage,
 )
 
-DEFAULT_DATA_DIR = "./data/Challenge_train_data"
+DEFAULT_DATA_DIR = "../data/Challenge_train_data"
 
 
 class TwoViewDataset(Dataset):
