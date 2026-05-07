@@ -139,10 +139,11 @@ run_python_train() {
 
 build_experiment_id() {
     local base_id="$1"
+    local stage_suffix="$2"
     if [ -n "${EXPERIMENT_ID}" ]; then
-        printf '%s\n' "${EXPERIMENT_ID}"
+        printf '%s_%s\n' "${EXPERIMENT_ID}" "${stage_suffix}"
     else
-        printf '%s\n' "${base_id}"
+        printf '%s_%s\n' "${base_id}" "${stage_suffix}"
     fi
 }
 
@@ -184,7 +185,7 @@ for backbone in "${BACKBONES[@]}"; do
         mkdir -p "${BASELINE_SAVE_DIR}" "${PRETRAIN_SAVE_DIR}" "${FINETUNE_SAVE_DIR}"
 
         base_pretrain_experiment_id="${backbone}_pretrain_${PRETRAIN_LOSS}"
-        pretrain_experiment_id="$(build_experiment_id "${base_pretrain_experiment_id}")"
+        pretrain_experiment_id="$(build_experiment_id "${base_pretrain_experiment_id}" "pretrain")"
         encoder_ckpt="${PRETRAIN_SAVE_DIR}/${pretrain_experiment_id}_encoder.pt"
 
         run_pretrain_stage=0
@@ -204,7 +205,7 @@ for backbone in "${BACKBONES[@]}"; do
                 echo "Running fold $((fold_index + 1))/${CV_NUM_FOLDS} for backbone ${backbone}"
             fi
             base_baseline_experiment_id="${backbone}_baseline_${FINETUNE_LOSS}_${HEAD_TYPE}"
-            baseline_experiment_id="$(build_experiment_id "${base_baseline_experiment_id}")"
+            baseline_experiment_id="$(build_experiment_id "${base_baseline_experiment_id}" "baseline")"
             mapfile -t baseline_args < <(
                 build_common_args "baseline" "${backbone}" "${FINETUNE_LOSS}" "${baseline_experiment_id}" "${FINETUNE_EPOCHS}" "${BASELINE_SAVE_DIR}" "${CV_NUM_FOLDS}" "${fold_index}"
             )
@@ -255,7 +256,7 @@ for backbone in "${BACKBONES[@]}"; do
         if [ "${run_finetune_stage}" = "1" ]; then
             echo
             base_finetune_experiment_id="${backbone}_finetune_${PRETRAIN_LOSS}_${FINETUNE_LOSS}_${HEAD_TYPE}"
-            finetune_experiment_id="$(build_experiment_id "${base_finetune_experiment_id}")"
+            finetune_experiment_id="$(build_experiment_id "${base_finetune_experiment_id}" "finetune")"
             mapfile -t finetune_args < <(
                 build_common_args "finetune" "${backbone}" "${FINETUNE_LOSS}" "${finetune_experiment_id}" "${FINETUNE_EPOCHS}" "${FINETUNE_SAVE_DIR}" "${CV_NUM_FOLDS}" "${fold_index}"
             )
