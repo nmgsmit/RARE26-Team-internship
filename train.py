@@ -132,6 +132,18 @@ def get_args_parser():
         help="Learning rate for finetune-stage classifier training. Defaults to 3e-4.",
     )
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument(
+        "--num-folds",
+        type=int,
+        default=1,
+        help="Number of cross-validation folds. Use 1 for the default single split.",
+    )
+    parser.add_argument(
+        "--fold-index",
+        type=int,
+        default=0,
+        help="Zero-based validation fold index when --num-folds > 1.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--experiment-id", type=str, default="rare25-run")
     parser.add_argument("--save-dir", type=str, default="./checkpoints")
@@ -346,6 +358,15 @@ def resolve_runtime_config(args):
         raise ValueError(f"--head-dropout must be in [0, 1), got {args.head_dropout}.")
     if not 0.0 <= args.mlp_dropout < 1.0:
         raise ValueError(f"--mlp-dropout must be in [0, 1), got {args.mlp_dropout}.")
+    if args.num_folds <= 0:
+        raise ValueError(f"--num-folds must be >= 1, got {args.num_folds}.")
+    if args.num_folds == 1:
+        args.fold_index = 0
+    elif args.fold_index < 0 or args.fold_index >= args.num_folds:
+        raise ValueError(
+            f"--fold-index must be in [0, {args.num_folds - 1}] when using cross-validation, "
+            f"got {args.fold_index}."
+        )
 
     if args.baseline_lr is None:
         args.baseline_lr = args.lr
@@ -578,6 +599,8 @@ def main(args):
     print(
         f"Stage: {args.stage} | Loss: {args.loss_name} | Backbone preset: {args.backbone_preset}"
     )
+    if args.num_folds > 1:
+        print(f"Cross-validation: fold {args.fold_index + 1}/{args.num_folds}")
     print(
         f"Resolved backbone: {args.backbone_name} | input size: {args.input_size} | "
         f"pretrained: {args.pretrained} | backbone weights: {args.backbone_weights_path}"
@@ -649,6 +672,8 @@ def main(args):
         "n_classes": len(class_names),
         "backbone_preset": args.backbone_preset,
         "backbone_name": args.backbone_name,
+        "num_folds": args.num_folds,
+        "fold_index": args.fold_index,
         "input_size": args.input_size,
         "pretrained": False,
         "proj_dim": 128,
@@ -908,6 +933,8 @@ def main(args):
                     extra_metadata={
                         "experiment_id": args.experiment_id,
                         "epoch": epoch + 1,
+                        "num_folds": args.num_folds,
+                        "fold_index": args.fold_index,
                         "selected_threshold": valid_threshold,
                         "stage": args.stage,
                         "loss_name": args.loss_name,
@@ -929,6 +956,8 @@ def main(args):
                 "proj_head": model.proj_head.state_dict(),
                 "backbone_name": args.backbone_name,
                 "backbone_preset": args.backbone_preset,
+                "num_folds": args.num_folds,
+                "fold_index": args.fold_index,
                 "input_size": args.input_size,
                 "loss_name": args.loss_name,
                 "model_config": checkpoint_model_config,
@@ -944,6 +973,8 @@ def main(args):
                 extra_metadata={
                     "experiment_id": args.experiment_id,
                     "epoch": args.epochs,
+                    "num_folds": args.num_folds,
+                    "fold_index": args.fold_index,
                     "stage": args.stage,
                     "loss_name": args.loss_name,
                 },

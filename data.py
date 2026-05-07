@@ -3,7 +3,7 @@ import os
 import pandas as pd
 import torch
 from PIL import Image
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from torch.utils.data import DataLoader, Dataset
 from torchvision.datasets import ImageFolder
 from torchvision.transforms.v2 import (
@@ -65,6 +65,8 @@ def build_eval_transform(input_size):
 def prepare_datasets(args, device):
     input_size = getattr(args, "input_size", 336)
     data_dir = DEFAULT_DATA_DIR
+    num_folds = int(getattr(args, "num_folds", 1))
+    fold_index = int(getattr(args, "fold_index", 0))
     print(f"Using input size: {input_size}x{input_size}")
 
     train_transform_1 = Compose([
@@ -120,12 +122,33 @@ def prepare_datasets(args, device):
     df = pd.DataFrame({"img": all_images, "label": all_labels, "center": all_centers})
     df["stratify_col"] = df["center"].astype(str) + "_" + df["label"].astype(str)
 
-    train_df, val_df = train_test_split(
-        df,
-        test_size=0.2,
-        stratify=df["stratify_col"],
-        random_state=42,
-    )
+    if num_folds <= 1:
+        train_df, val_df = train_test_split(
+            df,
+            test_size=0.2,
+            stratify=df["stratify_col"],
+            random_state=42,
+        )
+        print("Using single validation split (80/20 stratified).")
+    else:
+        if fold_index < 0 or fold_index >= num_folds:
+            raise ValueError(
+                f"fold_index must be in [0, {num_folds - 1}], got {fold_index}."
+            )
+        splitter = StratifiedKFold(
+            n_splits=num_folds,
+            shuffle=True,
+            random_state=getattr(args, "seed", 42),
+        )
+        split_indices = list(splitter.split(df, df["stratify_col"]))
+        train_indices, val_indices = split_indices[fold_index]
+        train_df = df.iloc[train_indices].copy()
+        val_df = df.iloc[val_indices].copy()
+        print(
+            f"Using {num_folds}-fold cross-validation | "
+            f"fold {fold_index + 1}/{num_folds} as validation."
+        )
+
     val_df = val_df.reset_index(drop=True)
 
     train_ds = TwoViewDataset(train_df, train_transform_1, train_transform_2)
