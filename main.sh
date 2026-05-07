@@ -3,21 +3,20 @@
 set -euo pipefail
 
 # Fill this in first for new runs.
-# When set, this prefix is added in front of the auto-generated stage/backbone experiment ids.
+# When set, this becomes the checkpoint base name for each stage-specific folder.
 EXPERIMENT_ID="${EXPERIMENT_ID:-name}"
 WANDB_GROUP="${WANDB_GROUP:-group}"
 
+# Easy checkpoint save configuration.
+CHECKPOINT_ROOT_DIR="${CHECKPOINT_ROOT_DIR:-./checkpoints}"
+BASELINE_SAVE_SUBDIR="${BASELINE_SAVE_SUBDIR:-baselines}"
+PRETRAIN_SAVE_SUBDIR="${PRETRAIN_SAVE_SUBDIR:-pretrain}"
+FINETUNE_SAVE_SUBDIR="${FINETUNE_SAVE_SUBDIR:-finetune}"
+
+# Crucial model choices.
 # Supported entries in BACKBONES_CSV include: gastronet, dinov3, simclr, mocov2, resnet50
 BACKBONES_CSV="${BACKBONES_CSV:-gastronet,dinov3}" # gastronet, dinov3, simclr, mocov2, resnet50
 STAGES_CSV="${STAGES_CSV:-pretrain,finetune}" # baseline, pretrain, finetune
-PRETRAIN_EPOCHS="${PRETRAIN_EPOCHS:-20}"
-FINETUNE_EPOCHS="${FINETUNE_EPOCHS:-20}"
-
-# Finetune optimization
-FORCE_PRETRAIN="${FORCE_PRETRAIN:-1}"  # set to 0 to quickly optimize finetune
-PRETRAIN_CHECKPOINT="${PRETRAIN_CHECKPOINT:-set_checkpoint.pt}" # select pretraining chekcpoint
-
-# Crucial model choices.
 PRETRAIN_LOSS="${PRETRAIN_LOSS:-suppro}"
 FINETUNE_LOSS="${FINETUNE_LOSS:-class-balanced}"
 HEAD_TYPE="${HEAD_TYPE:-linear}"
@@ -26,12 +25,17 @@ HEAD_TYPE="${HEAD_TYPE:-linear}"
 TEMPERATURE="${TEMPERATURE:-0.07}"
 BASE_TEMPERATURE="${BASE_TEMPERATURE:-0.07}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
+PRETRAIN_EPOCHS="${PRETRAIN_EPOCHS:-20}"
+FINETUNE_EPOCHS="${FINETUNE_EPOCHS:-20}"
 LR="${LR:-1e-4}"
 WARMUP_EPOCHS="${WARMUP_EPOCHS:-3}"
 SEED="${SEED:-42}"
 
+# Finetune optimization.
+FORCE_PRETRAIN="${FORCE_PRETRAIN:-1}"  # set to 0 to quickly optimize finetune
+PRETRAIN_CHECKPOINT="${PRETRAIN_CHECKPOINT:-set_checkpoint.pt}" # select pretraining checkpoint
+
 # Shared paths and runtime defaults: these usually stay fixed across runs.
-SAVE_DIR="${SAVE_DIR:-./checkpoints/linear_suppro_dual_backbone}"
 WANDB_PROJECT="${WANDB_PROJECT:-RARE25-Project}"
 NUM_WORKERS="${NUM_WORKERS:-10}"
 
@@ -61,7 +65,11 @@ for stage in "${STAGES[@]}"; do
     esac
 done
 
-mkdir -p "${SAVE_DIR}"
+BASELINE_SAVE_DIR="${CHECKPOINT_ROOT_DIR}/${BASELINE_SAVE_SUBDIR}"
+PRETRAIN_SAVE_DIR="${CHECKPOINT_ROOT_DIR}/${PRETRAIN_SAVE_SUBDIR}"
+FINETUNE_SAVE_DIR="${CHECKPOINT_ROOT_DIR}/${FINETUNE_SAVE_SUBDIR}"
+
+mkdir -p "${BASELINE_SAVE_DIR}" "${PRETRAIN_SAVE_DIR}" "${FINETUNE_SAVE_DIR}"
 
 build_common_args() {
     local stage="$1"
@@ -69,6 +77,7 @@ build_common_args() {
     local loss_name="$3"
     local experiment_id="$4"
     local epochs="$5"
+    local save_dir="$6"
 
     local args=(
         --stage "${stage}"
@@ -84,7 +93,7 @@ build_common_args() {
         --warmup-epochs "${WARMUP_EPOCHS}"
         --num-workers "${NUM_WORKERS}"
         --seed "${SEED}"
-        --save-dir "${SAVE_DIR}"
+        --save-dir "${save_dir}"
         --temperature "${TEMPERATURE}"
         --base-temperature "${BASE_TEMPERATURE}"
     )
@@ -116,23 +125,21 @@ run_python_train() {
 build_experiment_id() {
     local base_id="$1"
     if [ -n "${EXPERIMENT_ID}" ]; then
-        printf '%s_%s\n' "${EXPERIMENT_ID}" "${base_id}"
+        printf '%s\n' "${EXPERIMENT_ID}"
     else
         printf '%s\n' "${base_id}"
     fi
 }
 
 resolve_encoder_checkpoint() {
-    local backbone="$1"
-    local pretrain_experiment_id="$2"
-    local base_pretrain_experiment_id="$3"
-    local primary_ckpt="${SAVE_DIR}/${pretrain_experiment_id}_encoder.pt"
+    local pretrain_experiment_id="$1"
+    local base_pretrain_experiment_id="$2"
+    local primary_ckpt="${PRETRAIN_SAVE_DIR}/${pretrain_experiment_id}_encoder.pt"
 
     local candidates=(
         "${primary_ckpt}"
-        "./checkpoints/${pretrain_experiment_id}_encoder.pt"
-        "./checkpoints/${base_pretrain_experiment_id}_encoder.pt"
-        "./checkpoints/${backbone}_pretrain_${PRETRAIN_LOSS}_encoder.pt"
+        "${CHECKPOINT_ROOT_DIR}/${pretrain_experiment_id}_encoder.pt"
+        "${CHECKPOINT_ROOT_DIR}/${base_pretrain_experiment_id}_encoder.pt"
     )
 
     for candidate in "${candidates[@]}"; do
@@ -148,7 +155,7 @@ resolve_encoder_checkpoint() {
 for backbone in "${BACKBONES[@]}"; do
     base_pretrain_experiment_id="${backbone}_pretrain_${PRETRAIN_LOSS}"
     pretrain_experiment_id="$(build_experiment_id "${base_pretrain_experiment_id}")"
-    encoder_ckpt="${SAVE_DIR}/${pretrain_experiment_id}_encoder.pt"
+    encoder_ckpt="${PRETRAIN_SAVE_DIR}/${pretrain_experiment_id}_encoder.pt"
 
     run_pretrain_stage=0
     run_baseline_stage=0
@@ -166,7 +173,7 @@ for backbone in "${BACKBONES[@]}"; do
         base_baseline_experiment_id="${backbone}_baseline_${FINETUNE_LOSS}_${HEAD_TYPE}"
         baseline_experiment_id="$(build_experiment_id "${base_baseline_experiment_id}")"
         mapfile -t baseline_args < <(
-            build_common_args "baseline" "${backbone}" "${FINETUNE_LOSS}" "${baseline_experiment_id}" "${FINETUNE_EPOCHS}"
+            build_common_args "baseline" "${backbone}" "${FINETUNE_LOSS}" "${baseline_experiment_id}" "${FINETUNE_EPOCHS}" "${BASELINE_SAVE_DIR}"
         )
         run_python_train "${baseline_args[@]}"
     fi
@@ -176,7 +183,7 @@ for backbone in "${BACKBONES[@]}"; do
             echo
             echo "FORCE_PRETRAIN=1, so pretraining will run even if an encoder checkpoint already exists."
             mapfile -t pretrain_args < <(
-                build_common_args "pretrain" "${backbone}" "${PRETRAIN_LOSS}" "${pretrain_experiment_id}" "${PRETRAIN_EPOCHS}"
+                build_common_args "pretrain" "${backbone}" "${PRETRAIN_LOSS}" "${pretrain_experiment_id}" "${PRETRAIN_EPOCHS}" "${PRETRAIN_SAVE_DIR}"
             )
             run_python_train "${pretrain_args[@]}"
         elif [ "${run_pretrain_stage}" = "1" ] && [ -n "${PRETRAIN_CHECKPOINT}" ]; then
@@ -189,7 +196,7 @@ for backbone in "${BACKBONES[@]}"; do
             echo "Using PRETRAIN_CHECKPOINT from main.sh: ${encoder_ckpt}"
         elif [ "${run_pretrain_stage}" = "1" ]; then
             mapfile -t pretrain_args < <(
-                build_common_args "pretrain" "${backbone}" "${PRETRAIN_LOSS}" "${pretrain_experiment_id}" "${PRETRAIN_EPOCHS}"
+                build_common_args "pretrain" "${backbone}" "${PRETRAIN_LOSS}" "${pretrain_experiment_id}" "${PRETRAIN_EPOCHS}" "${PRETRAIN_SAVE_DIR}"
             )
             run_python_train "${pretrain_args[@]}"
         elif [ -n "${PRETRAIN_CHECKPOINT}" ]; then
@@ -200,7 +207,7 @@ for backbone in "${BACKBONES[@]}"; do
             encoder_ckpt="${PRETRAIN_CHECKPOINT}"
             echo
             echo "Using PRETRAIN_CHECKPOINT from main.sh: ${encoder_ckpt}"
-        elif resolved_encoder_ckpt="$(resolve_encoder_checkpoint "${backbone}" "${pretrain_experiment_id}" "${base_pretrain_experiment_id}")"; then
+        elif resolved_encoder_ckpt="$(resolve_encoder_checkpoint "${pretrain_experiment_id}" "${base_pretrain_experiment_id}")"; then
             encoder_ckpt="${resolved_encoder_ckpt}"
             echo
             echo "Found existing pretrained encoder checkpoint: ${encoder_ckpt}"
@@ -216,7 +223,7 @@ for backbone in "${BACKBONES[@]}"; do
         base_finetune_experiment_id="${backbone}_finetune_${PRETRAIN_LOSS}_${FINETUNE_LOSS}_${HEAD_TYPE}"
         finetune_experiment_id="$(build_experiment_id "${base_finetune_experiment_id}")"
         mapfile -t finetune_args < <(
-            build_common_args "finetune" "${backbone}" "${FINETUNE_LOSS}" "${finetune_experiment_id}" "${FINETUNE_EPOCHS}"
+            build_common_args "finetune" "${backbone}" "${FINETUNE_LOSS}" "${finetune_experiment_id}" "${FINETUNE_EPOCHS}" "${FINETUNE_SAVE_DIR}"
         )
         finetune_args+=(--encoder-ckpt "${encoder_ckpt}")
         run_python_train "${finetune_args[@]}"
