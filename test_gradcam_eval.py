@@ -11,13 +11,67 @@ from gradcam import (
     _overlay_soft_consensus,
     _select_display_cam_tensor,
     build_expert_consensus_masks,
+    compute_vit_gradcam_batch,
     compute_soft_mask_mass,
     compute_pixel_average_precision,
 )
 from testdata import build_barrett_gradcam_samples
 
 
+class _ToyCnnBackbone(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv = torch.nn.Conv2d(3, 4, kernel_size=3, padding=1, bias=False)
+        self.pool = torch.nn.AdaptiveAvgPool2d((1, 1))
+        self.num_features = 4
+
+    def forward_features(self, x):
+        return self.conv(x)
+
+    def forward_head(self, features, pre_logits=False):
+        pooled = self.pool(features).flatten(1)
+        if pre_logits:
+            return pooled
+        return pooled
+
+
+class _ToyCnnModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.backbone = _ToyCnnBackbone()
+        self.head = torch.nn.Linear(4, 2, bias=False)
+
+    def forward_tokens(self, x):
+        return self.backbone.forward_features(x)
+
+    def forward_from_tokens(self, tokens):
+        pooled = self.backbone.forward_head(tokens, pre_logits=True)
+        return self.head(pooled)
+
+    def forward(self, x):
+        return self.forward_from_tokens(self.forward_tokens(x))
+
+
 class GradcamMetricTests(unittest.TestCase):
+    def test_compute_gradcam_batch_supports_cnn_feature_maps(self):
+        torch.manual_seed(0)
+        model = _ToyCnnModel()
+        images = torch.randn(2, 3, 8, 8, dtype=torch.float32)
+
+        cams, probs, raw_cams = compute_vit_gradcam_batch(
+            model,
+            images,
+            target_class=1,
+            return_raw=True,
+        )
+
+        self.assertEqual(cams.shape, (2, 8, 8))
+        self.assertEqual(raw_cams.shape, (2, 8, 8))
+        self.assertEqual(probs.shape, (2,))
+        self.assertTrue(torch.all(cams >= 0.0))
+        self.assertTrue(torch.all(cams <= 1.0))
+        self.assertGreater(float(raw_cams.abs().sum().item()), 0.0)
+
     def test_compute_pixel_average_precision_perfect_ranking(self):
         score_map = torch.tensor([
             [0.1, 0.2, 0.3],

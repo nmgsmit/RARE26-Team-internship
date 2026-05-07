@@ -62,6 +62,43 @@ def _normalize_heatmaps(cams, eps=1e-8):
     return normalized.view_as(cams)
 
 
+def _compute_token_gradcam(cam_tokens, token_grads, images, model):
+    num_prefix_tokens = _get_num_prefix_tokens(model)
+    grid_h, grid_w = _get_patch_grid_size(model)
+    patch_tokens = cam_tokens[:, num_prefix_tokens:, :]
+    patch_grads = token_grads[:, num_prefix_tokens:, :]
+
+    expected_patch_count = grid_h * grid_w
+    if patch_tokens.shape[1] != expected_patch_count:
+        raise ValueError(
+            "Unexpected ViT token count for Grad-CAM reshaping: "
+            f"got {patch_tokens.shape[1]} patch tokens, expected {expected_patch_count}."
+        )
+
+    channel_weights = patch_grads.mean(dim=1, keepdim=True)
+    signed_cams = torch.sum(patch_tokens * channel_weights, dim=-1)
+    signed_cams = signed_cams.view(images.shape[0], 1, grid_h, grid_w)
+    signed_cams = F.interpolate(
+        signed_cams,
+        size=images.shape[-2:],
+        mode="bilinear",
+        align_corners=False,
+    ).squeeze(1)
+    return signed_cams
+
+
+def _compute_featuremap_gradcam(cam_features, feature_grads, images):
+    channel_weights = feature_grads.mean(dim=(2, 3), keepdim=True)
+    signed_cams = torch.sum(cam_features * channel_weights, dim=1, keepdim=True)
+    signed_cams = F.interpolate(
+        signed_cams,
+        size=images.shape[-2:],
+        mode="bilinear",
+        align_corners=False,
+    ).squeeze(1)
+    return signed_cams
+
+
 def compute_vit_gradcam_batch(model, images, target_class=1, return_raw=False):
     if images.ndim != 4:
         raise ValueError(f"Expected images with shape [B, C, H, W], got {tuple(images.shape)}.")
@@ -90,32 +127,27 @@ def compute_vit_gradcam_batch(model, images, target_class=1, return_raw=False):
 
     target_scores = logits[:, target_class].sum()
     cam_tokens = captured.get("tokens", tokens)
-    if cam_tokens.ndim != 3:
-        raise ValueError(f"Expected token activations with shape [B, N, C], got {tuple(cam_tokens.shape)}.")
-
-    token_grads = torch.autograd.grad(target_scores, cam_tokens, retain_graph=False, create_graph=False)[0]
-
-    num_prefix_tokens = _get_num_prefix_tokens(model)
-    grid_h, grid_w = _get_patch_grid_size(model)
-    patch_tokens = cam_tokens[:, num_prefix_tokens:, :]
-    patch_grads = token_grads[:, num_prefix_tokens:, :]
-
-    expected_patch_count = grid_h * grid_w
-    if patch_tokens.shape[1] != expected_patch_count:
+    if cam_tokens.ndim == 3:
+        token_grads = torch.autograd.grad(
+            target_scores,
+            cam_tokens,
+            retain_graph=False,
+            create_graph=False,
+        )[0]
+        signed_cams = _compute_token_gradcam(cam_tokens, token_grads, images, model)
+    elif cam_tokens.ndim == 4:
+        feature_grads = torch.autograd.grad(
+            target_scores,
+            cam_tokens,
+            retain_graph=False,
+            create_graph=False,
+        )[0]
+        signed_cams = _compute_featuremap_gradcam(cam_tokens, feature_grads, images)
+    else:
         raise ValueError(
-            "Unexpected ViT token count for Grad-CAM reshaping: "
-            f"got {patch_tokens.shape[1]} patch tokens, expected {expected_patch_count}."
+            "Expected Grad-CAM activations with shape [B, N, C] for token backbones "
+            f"or [B, C, H, W] for CNN backbones, got {tuple(cam_tokens.shape)}."
         )
-
-    channel_weights = patch_grads.mean(dim=1, keepdim=True)
-    signed_cams = torch.sum(patch_tokens * channel_weights, dim=-1)
-    signed_cams = signed_cams.view(images.shape[0], 1, grid_h, grid_w)
-    signed_cams = F.interpolate(
-        signed_cams,
-        size=images.shape[-2:],
-        mode="bilinear",
-        align_corners=False,
-    ).squeeze(1)
     cams = torch.relu(signed_cams)
     raw_cams = signed_cams
     cams = _normalize_heatmaps(cams)
