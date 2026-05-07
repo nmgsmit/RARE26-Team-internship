@@ -10,6 +10,7 @@ WANDB_GROUP="${WANDB_GROUP:-supcon}"
 # Crucial model choices.
 # Supported entries in BACKBONES_CSV include: gastronet, dinov3, simclr, mocov2, resnet50
 BACKBONES_CSV="${BACKBONES_CSV:-gastronet,dinov3}"
+STAGES_CSV="${STAGES_CSV:-pretrain,finetune}"
 PRETRAIN_LOSS="${PRETRAIN_LOSS:-suppro}"
 FINETUNE_LOSS="${FINETUNE_LOSS:-class-balanced}"
 HEAD_TYPE="${HEAD_TYPE:-linear}"
@@ -40,11 +41,22 @@ RESNET50_CKPT="${RESNET50_CKPT:-../Gastronet/RN50_ImageNet_timm_resnet50.pth}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 IFS=',' read -r -a BACKBONES <<< "${BACKBONES_CSV}"
+IFS=',' read -r -a STAGES <<< "${STAGES_CSV}"
 
 if [ -n "${PRETRAIN_CHECKPOINT}" ] && [ "${#BACKBONES[@]}" -gt 1 ]; then
     echo "PRETRAIN_CHECKPOINT expects a single backbone run. Set BACKBONES_CSV to one backbone or leave PRETRAIN_CHECKPOINT blank." >&2
     exit 1
 fi
+
+for stage in "${STAGES[@]}"; do
+    case "${stage}" in
+        baseline|pretrain|finetune) ;;
+        *)
+            echo "Unsupported stage in STAGES_CSV: ${stage}. Use baseline, pretrain, finetune, or a comma-separated combination." >&2
+            exit 1
+            ;;
+    esac
+done
 
 mkdir -p "${SAVE_DIR}"
 
@@ -135,38 +147,75 @@ for backbone in "${BACKBONES[@]}"; do
     pretrain_experiment_id="$(build_experiment_id "${base_pretrain_experiment_id}")"
     encoder_ckpt="${SAVE_DIR}/${pretrain_experiment_id}_encoder.pt"
 
-    if [ "${FORCE_PRETRAIN}" = "1" ]; then
+    run_pretrain_stage=0
+    run_baseline_stage=0
+    run_finetune_stage=0
+    for stage in "${STAGES[@]}"; do
+        case "${stage}" in
+            baseline) run_baseline_stage=1 ;;
+            pretrain) run_pretrain_stage=1 ;;
+            finetune) run_finetune_stage=1 ;;
+        esac
+    done
+
+    if [ "${run_baseline_stage}" = "1" ]; then
         echo
-        echo "FORCE_PRETRAIN=1, so pretraining will run even if an encoder checkpoint already exists."
-        mapfile -t pretrain_args < <(
-            build_common_args "pretrain" "${backbone}" "${PRETRAIN_LOSS}" "${pretrain_experiment_id}" "${PRETRAIN_EPOCHS}"
+        base_baseline_experiment_id="${backbone}_baseline_${FINETUNE_LOSS}_${HEAD_TYPE}"
+        baseline_experiment_id="$(build_experiment_id "${base_baseline_experiment_id}")"
+        mapfile -t baseline_args < <(
+            build_common_args "baseline" "${backbone}" "${FINETUNE_LOSS}" "${baseline_experiment_id}" "${FINETUNE_EPOCHS}"
         )
-        run_python_train "${pretrain_args[@]}"
-    elif [ -n "${PRETRAIN_CHECKPOINT}" ]; then
-        if [ ! -f "${PRETRAIN_CHECKPOINT}" ]; then
-            echo "Configured PRETRAIN_CHECKPOINT does not exist: ${PRETRAIN_CHECKPOINT}" >&2
-            exit 1
-        fi
-        encoder_ckpt="${PRETRAIN_CHECKPOINT}"
-        echo
-        echo "Using PRETRAIN_CHECKPOINT from main.sh: ${encoder_ckpt}"
-    elif resolved_encoder_ckpt="$(resolve_encoder_checkpoint "${backbone}" "${pretrain_experiment_id}" "${base_pretrain_experiment_id}")"; then
-        encoder_ckpt="${resolved_encoder_ckpt}"
-        echo
-        echo "Found existing pretrained encoder checkpoint: ${encoder_ckpt}"
-        echo "Skipping pretraining and reusing the existing encoder. Set FORCE_PRETRAIN=1 to retrain it."
-    else
-        mapfile -t pretrain_args < <(
-            build_common_args "pretrain" "${backbone}" "${PRETRAIN_LOSS}" "${pretrain_experiment_id}" "${PRETRAIN_EPOCHS}"
-        )
-        run_python_train "${pretrain_args[@]}"
+        run_python_train "${baseline_args[@]}"
     fi
 
-    base_finetune_experiment_id="${backbone}_finetune_${PRETRAIN_LOSS}_${FINETUNE_LOSS}_${HEAD_TYPE}"
-    finetune_experiment_id="$(build_experiment_id "${base_finetune_experiment_id}")"
-    mapfile -t finetune_args < <(
-        build_common_args "finetune" "${backbone}" "${FINETUNE_LOSS}" "${finetune_experiment_id}" "${FINETUNE_EPOCHS}"
-    )
-    finetune_args+=(--encoder-ckpt "${encoder_ckpt}")
-    run_python_train "${finetune_args[@]}"
+    if [ "${run_pretrain_stage}" = "1" ] || [ "${run_finetune_stage}" = "1" ]; then
+        if [ "${run_pretrain_stage}" = "1" ] && [ "${FORCE_PRETRAIN}" = "1" ]; then
+            echo
+            echo "FORCE_PRETRAIN=1, so pretraining will run even if an encoder checkpoint already exists."
+            mapfile -t pretrain_args < <(
+                build_common_args "pretrain" "${backbone}" "${PRETRAIN_LOSS}" "${pretrain_experiment_id}" "${PRETRAIN_EPOCHS}"
+            )
+            run_python_train "${pretrain_args[@]}"
+        elif [ "${run_pretrain_stage}" = "1" ] && [ -n "${PRETRAIN_CHECKPOINT}" ]; then
+            if [ ! -f "${PRETRAIN_CHECKPOINT}" ]; then
+                echo "Configured PRETRAIN_CHECKPOINT does not exist: ${PRETRAIN_CHECKPOINT}" >&2
+                exit 1
+            fi
+            encoder_ckpt="${PRETRAIN_CHECKPOINT}"
+            echo
+            echo "Using PRETRAIN_CHECKPOINT from main.sh: ${encoder_ckpt}"
+        elif [ "${run_pretrain_stage}" = "1" ]; then
+            mapfile -t pretrain_args < <(
+                build_common_args "pretrain" "${backbone}" "${PRETRAIN_LOSS}" "${pretrain_experiment_id}" "${PRETRAIN_EPOCHS}"
+            )
+            run_python_train "${pretrain_args[@]}"
+        elif [ -n "${PRETRAIN_CHECKPOINT}" ]; then
+            if [ ! -f "${PRETRAIN_CHECKPOINT}" ]; then
+                echo "Configured PRETRAIN_CHECKPOINT does not exist: ${PRETRAIN_CHECKPOINT}" >&2
+                exit 1
+            fi
+            encoder_ckpt="${PRETRAIN_CHECKPOINT}"
+            echo
+            echo "Using PRETRAIN_CHECKPOINT from main.sh: ${encoder_ckpt}"
+        elif resolved_encoder_ckpt="$(resolve_encoder_checkpoint "${backbone}" "${pretrain_experiment_id}" "${base_pretrain_experiment_id}")"; then
+            encoder_ckpt="${resolved_encoder_ckpt}"
+            echo
+            echo "Found existing pretrained encoder checkpoint: ${encoder_ckpt}"
+            echo "Skipping pretraining and reusing the existing encoder. Set FORCE_PRETRAIN=1 to retrain it."
+        else
+            echo "Finetune requested, but no encoder checkpoint was found for backbone ${backbone}." >&2
+            echo "Run with STAGES_CSV=pretrain,finetune or set PRETRAIN_CHECKPOINT=/path/to/checkpoint.pt" >&2
+            exit 1
+        fi
+    fi
+
+    if [ "${run_finetune_stage}" = "1" ]; then
+        base_finetune_experiment_id="${backbone}_finetune_${PRETRAIN_LOSS}_${FINETUNE_LOSS}_${HEAD_TYPE}"
+        finetune_experiment_id="$(build_experiment_id "${base_finetune_experiment_id}")"
+        mapfile -t finetune_args < <(
+            build_common_args "finetune" "${backbone}" "${FINETUNE_LOSS}" "${finetune_experiment_id}" "${FINETUNE_EPOCHS}"
+        )
+        finetune_args+=(--encoder-ckpt "${encoder_ckpt}")
+        run_python_train "${finetune_args[@]}"
+    fi
 done
