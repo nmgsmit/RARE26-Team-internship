@@ -121,7 +121,9 @@ build_common_args() {
         args+=(--backbone-weights-path "${RESNET50_CKPT}" --no-pretrained)
     fi
 
-    if [ "${stage}" = "finetune" ]; then
+    # Baseline and finetune both produce classifier checkpoints, so run the
+    # post-training Grad-CAM evaluation for both and keep it in the same W&B run.
+    if [ "${stage}" = "baseline" ] || [ "${stage}" = "finetune" ]; then
         args+=(--post-train-gradcam)
     fi
 
