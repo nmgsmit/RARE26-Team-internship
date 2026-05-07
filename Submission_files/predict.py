@@ -51,6 +51,7 @@ def main():
         fallback_kwargs=DEFAULT_MODEL_KWARGS,
     )
     model_kwargs["pretrained"] = False
+    model_kwargs.pop("backbone_weights_path", None)
 
     input_size = int(model_kwargs.get("input_size", DEFAULT_MODEL_KWARGS["input_size"]))
     n_classes = int(model_kwargs.get("n_classes", DEFAULT_MODEL_KWARGS["n_classes"]))

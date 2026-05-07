@@ -28,6 +28,9 @@ from testdata import load_barrett_gradcam_dataset, load_external_testset, load_s
 
 
 DEFAULT_GASTRONET_CKPT = "../Gastronet/dinov2.pth"
+DEFAULT_SIMCLR_CKPT = "../Gastronet/RN50_GastroNet-5M_SIMCLRv2.pth"
+DEFAULT_MOCOV2_CKPT = "../Gastronet/RN50_GastroNet-5M_MOCOv2.pth"
+DEFAULT_RESNET50_CKPT = "../Gastronet/RN50_ImageNet_timm_resnet50.pth"
 DEFAULT_DATA_DIR = "./data/Challenge_train_data"
 DEFAULT_TESTSET_IMAGES_DIR = "./data/EVC_Barretts_FullSet/images"
 DEFAULT_POST_TRAIN_GRADCAM_DATASET_ROOT = "./data/EVC_Barretts_FullSet"
@@ -51,6 +54,24 @@ BACKBONE_PRESETS = {
         "backbone_name": "vit_base_patch14_reg4_dinov2",
         "backbone_weights_path": DEFAULT_GASTRONET_CKPT,
         "input_size": 336,
+        "pretrained": False,
+    },
+    "simclr": {
+        "backbone_name": "resnet50",
+        "backbone_weights_path": DEFAULT_SIMCLR_CKPT,
+        "input_size": 224,
+        "pretrained": False,
+    },
+    "mocov2": {
+        "backbone_name": "resnet50",
+        "backbone_weights_path": DEFAULT_MOCOV2_CKPT,
+        "input_size": 224,
+        "pretrained": False,
+    },
+    "resnet50": {
+        "backbone_name": "resnet50",
+        "backbone_weights_path": DEFAULT_RESNET50_CKPT,
+        "input_size": 224,
         "pretrained": False,
     },
 }
@@ -144,7 +165,13 @@ def get_args_parser():
         type=str,
         choices=sorted(BACKBONE_PRESETS),
         default="gastronet",
-        help="Convenience switch for the backbone setup. 'dinov3' uses timm pretrained DINOv3 at 224px. 'gastronet' uses the GastroNet DINOv2 checkpoint at 336px.",
+        help=(
+            "Convenience switch for the backbone setup. 'dinov3' uses timm pretrained "
+            "DINOv3 at 224px. 'gastronet' uses the GastroNet DINOv2 checkpoint at 336px. "
+            "'simclr' uses the GastroNet SIMCLRv2 RN50 checkpoint at 224px. "
+            "'mocov2' uses the GastroNet MOCOv2 RN50 checkpoint at 224px. "
+            "'resnet50' uses a locally stored timm/ImageNet pretrained ResNet-50 checkpoint at 224px."
+        ),
     )
     parser.add_argument(
         "--backbone-name",
@@ -156,7 +183,13 @@ def get_args_parser():
         "--backbone-weights-path",
         type=str,
         default=None,
-        help="Optional manual override for the backbone checkpoint path. The gastronet preset defaults to ../Gastronet/dinov2.pth.",
+        help=(
+            "Optional manual override for the backbone checkpoint path. "
+            "The gastronet preset defaults to ../Gastronet/dinov2.pth and the simclr "
+            "preset defaults to ../Gastronet/RN50_GastroNet-5M_SIMCLRv2.pth. "
+            "The mocov2 preset defaults to ../Gastronet/RN50_GastroNet-5M_MOCOv2.pth. "
+            "The resnet50 preset defaults to ../Gastronet/RN50_ImageNet_timm_resnet50.pth."
+        ),
     )
     parser.add_argument(
         "--input-size",
@@ -581,6 +614,7 @@ def main(args):
     checkpoint_model_config = {
         "in_channels": 3,
         "n_classes": len(class_names),
+        "backbone_preset": args.backbone_preset,
         "backbone_name": args.backbone_name,
         "input_size": args.input_size,
         "pretrained": False,

@@ -8,6 +8,7 @@ EXPERIMENT_ID="${EXPERIMENT_ID:-}"
 WANDB_GROUP="${WANDB_GROUP:-supcon}"
 
 # Crucial model choices.
+# Supported entries in BACKBONES_CSV include: gastronet, dinov3, simclr, mocov2, resnet50
 BACKBONES_CSV="${BACKBONES_CSV:-gastronet,dinov3}"
 PRETRAIN_LOSS="${PRETRAIN_LOSS:-suppro}"
 FINETUNE_LOSS="${FINETUNE_LOSS:-class-balanced}"
@@ -28,10 +29,14 @@ LR="${LR:-1e-4}"
 WARMUP_EPOCHS="${WARMUP_EPOCHS:-3}"
 SEED="${SEED:-42}"
 
+# Shared paths and runtime defaults: these usually stay fixed across runs.
 SAVE_DIR="${SAVE_DIR:-./checkpoints/linear_suppro_dual_backbone}"
 WANDB_PROJECT="${WANDB_PROJECT:-RARE25-Project}"
 NUM_WORKERS="${NUM_WORKERS:-10}"
 GASTRONET_CKPT="${GASTRONET_CKPT:-../Gastronet/dinov2.pth}"
+SIMCLR_CKPT="${SIMCLR_CKPT:-../Gastronet/RN50_GastroNet-5M_SIMCLRv2.pth}"
+MOCOV2_CKPT="${MOCOV2_CKPT:-../Gastronet/RN50_GastroNet-5M_MOCOv2.pth}"
+RESNET50_CKPT="${RESNET50_CKPT:-../Gastronet/RN50_ImageNet_timm_resnet50.pth}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 IFS=',' read -r -a BACKBONES <<< "${BACKBONES_CSV}"
@@ -71,6 +76,12 @@ build_common_args() {
 
     if [ "${backbone}" = "gastronet" ]; then
         args+=(--backbone-weights-path "${GASTRONET_CKPT}")
+    elif [ "${backbone}" = "simclr" ]; then
+        args+=(--backbone-weights-path "${SIMCLR_CKPT}")
+    elif [ "${backbone}" = "mocov2" ]; then
+        args+=(--backbone-weights-path "${MOCOV2_CKPT}")
+    elif [ "${backbone}" = "resnet50" ]; then
+        args+=(--backbone-weights-path "${RESNET50_CKPT}" --no-pretrained)
     fi
 
     if [ "${stage}" = "finetune" ]; then
