@@ -107,6 +107,30 @@ def get_args_parser():
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument(
+        "--baseline-lr",
+        type=float,
+        default=None,
+        help="Learning rate for baseline-stage classifier training. Defaults to --lr.",
+    )
+    parser.add_argument(
+        "--pretrain-backbone-lr",
+        type=float,
+        default=None,
+        help="Learning rate for backbone parameters during pretraining. Defaults to --lr.",
+    )
+    parser.add_argument(
+        "--pretrain-proj-lr",
+        type=float,
+        default=None,
+        help="Learning rate for projection-head parameters during pretraining. Defaults to 3e-4.",
+    )
+    parser.add_argument(
+        "--finetune-lr",
+        type=float,
+        default=None,
+        help="Learning rate for finetune-stage classifier training. Defaults to 3e-4.",
+    )
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--experiment-id", type=str, default="rare25-run")
@@ -323,6 +347,15 @@ def resolve_runtime_config(args):
     if not 0.0 <= args.mlp_dropout < 1.0:
         raise ValueError(f"--mlp-dropout must be in [0, 1), got {args.mlp_dropout}.")
 
+    if args.baseline_lr is None:
+        args.baseline_lr = args.lr
+    if args.pretrain_backbone_lr is None:
+        args.pretrain_backbone_lr = args.lr
+    if args.pretrain_proj_lr is None:
+        args.pretrain_proj_lr = 3e-4
+    if args.finetune_lr is None:
+        args.finetune_lr = 3e-4
+
     preset = BACKBONE_PRESETS[args.backbone_preset]
     if args.backbone_name is None:
         args.backbone_name = preset["backbone_name"]
@@ -479,7 +512,7 @@ def configure_stage(model, args):
     if args.stage == "baseline":
         for parameter in model.proj_head.parameters():
             parameter.requires_grad = False
-        optimizer = AdamW(model.cls_head.parameters(), lr=args.lr)
+        optimizer = AdamW(model.cls_head.parameters(), lr=args.baseline_lr)
         scheduler = None
         return optimizer, scheduler
 
@@ -491,8 +524,8 @@ def configure_stage(model, args):
             
         optimizer = SGD(
             [
-                {"params": model.backbone.parameters(), "lr": args.lr},
-                {"params": model.proj_head.parameters(), "lr": 3e-4} 
+                {"params": model.backbone.parameters(), "lr": args.pretrain_backbone_lr},
+                {"params": model.proj_head.parameters(), "lr": args.pretrain_proj_lr}
             ],
             momentum=0.9,
             weight_decay=1e-4,
@@ -516,7 +549,7 @@ def configure_stage(model, args):
 
         optimizer = SGD(
             model.cls_head.parameters(),
-            lr=3e-4,
+            lr=args.finetune_lr,
             momentum=0.9,
             weight_decay=1e-4
         )
