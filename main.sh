@@ -4,28 +4,28 @@ set -euo pipefail
 
 # Fill this in first for new runs.
 # When set, this prefix is added in front of the auto-generated stage/backbone experiment ids.
-EXPERIMENT_ID="${EXPERIMENT_ID:-}"
-WANDB_GROUP="${WANDB_GROUP:-supcon}"
+EXPERIMENT_ID="${EXPERIMENT_ID:-name}"
+WANDB_GROUP="${WANDB_GROUP:-group}"
+
+# Supported entries in BACKBONES_CSV include: gastronet, dinov3, simclr, mocov2, resnet50
+BACKBONES_CSV="${BACKBONES_CSV:-gastronet,dinov3}" # gastronet, dinov3, simclr, mocov2, resnet50
+STAGES_CSV="${STAGES_CSV:-pretrain,finetune}" # baseline, pretrain, finetune
+PRETRAIN_EPOCHS="${PRETRAIN_EPOCHS:-20}"
+FINETUNE_EPOCHS="${FINETUNE_EPOCHS:-20}"
+
+# Finetune optimization
+FORCE_PRETRAIN="${FORCE_PRETRAIN:-1}"  # set to 0 to quickly optimize finetune
+PRETRAIN_CHECKPOINT="${PRETRAIN_CHECKPOINT:-set_checkpoint.pt}" # select pretraining chekcpoint
 
 # Crucial model choices.
-# Supported entries in BACKBONES_CSV include: gastronet, dinov3, simclr, mocov2, resnet50
-BACKBONES_CSV="${BACKBONES_CSV:-gastronet,dinov3}"
-STAGES_CSV="${STAGES_CSV:-pretrain,finetune}"
 PRETRAIN_LOSS="${PRETRAIN_LOSS:-suppro}"
 FINETUNE_LOSS="${FINETUNE_LOSS:-class-balanced}"
 HEAD_TYPE="${HEAD_TYPE:-linear}"
-TEMPERATURE="${TEMPERATURE:-0.07}"
-BASE_TEMPERATURE="${BASE_TEMPERATURE:-0.07}"
-
-# Checkpoint control. Leave PRETRAIN_CHECKPOINT blank to auto-detect one.
-PRETRAIN_CHECKPOINT="${PRETRAIN_CHECKPOINT:-}"
-# Standard is 0: reuse an existing checkpoint when possible.
-FORCE_PRETRAIN="${FORCE_PRETRAIN:-0}"
 
 # Training and optimization.
+TEMPERATURE="${TEMPERATURE:-0.07}"
+BASE_TEMPERATURE="${BASE_TEMPERATURE:-0.07}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
-PRETRAIN_EPOCHS="${PRETRAIN_EPOCHS:-20}"
-FINETUNE_EPOCHS="${FINETUNE_EPOCHS:-20}"
 LR="${LR:-1e-4}"
 WARMUP_EPOCHS="${WARMUP_EPOCHS:-3}"
 SEED="${SEED:-42}"
@@ -34,6 +34,8 @@ SEED="${SEED:-42}"
 SAVE_DIR="${SAVE_DIR:-./checkpoints/linear_suppro_dual_backbone}"
 WANDB_PROJECT="${WANDB_PROJECT:-RARE25-Project}"
 NUM_WORKERS="${NUM_WORKERS:-10}"
+
+
 # Hardcoded backbone checkpoints.
 GASTRONET_CKPT="../Gastronet/dinov2.pth"
 SIMCLR_CKPT="../Gastronet/RN50_GastroNet-5M_SIMCLRv2.pth"
