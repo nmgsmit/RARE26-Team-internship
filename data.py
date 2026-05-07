@@ -19,6 +19,8 @@ from torchvision.transforms.v2 import (
     ToImage,
 )
 
+DEFAULT_DATA_DIR = "./data/Challenge_train_data"
+
 
 class TwoViewDataset(Dataset):
     def __init__(self, df, transform1, transform2):
@@ -62,6 +64,7 @@ def build_eval_transform(input_size):
 
 def prepare_datasets(args, device):
     input_size = getattr(args, "input_size", 336)
+    data_dir = DEFAULT_DATA_DIR
     print(f"Using input size: {input_size}x{input_size}")
 
     train_transform_1 = Compose([
@@ -88,11 +91,11 @@ def prepare_datasets(args, device):
 
     centers = [
         folder
-        for folder in os.listdir(args.data_dir)
-        if folder.startswith("center") and os.path.isdir(os.path.join(args.data_dir, folder))
+        for folder in os.listdir(data_dir)
+        if folder.startswith("center") and os.path.isdir(os.path.join(data_dir, folder))
     ]
     if not centers:
-        raise ValueError(f"No center folders found in {args.data_dir}.")
+        raise ValueError(f"No center folders found in {data_dir}.")
 
     all_images = []
     all_labels = []
@@ -100,7 +103,7 @@ def prepare_datasets(args, device):
     class_names = None
 
     for center in centers:
-        center_path = os.path.join(args.data_dir, center)
+        center_path = os.path.join(data_dir, center)
         ds = ImageFolder(root=center_path)
 
         if ds.class_to_idx != {"ndbe": 0, "neo": 1}:

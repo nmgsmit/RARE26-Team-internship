@@ -28,6 +28,9 @@ from testdata import load_barrett_gradcam_dataset, load_external_testset, load_s
 
 
 DEFAULT_GASTRONET_CKPT = "../Gastronet/dinov2.pth"
+DEFAULT_DATA_DIR = "./data/Challenge_train_data"
+DEFAULT_TESTSET_IMAGES_DIR = "./data/EVC_Barretts_FullSet/images"
+DEFAULT_POST_TRAIN_GRADCAM_DATASET_ROOT = "./data/EVC_Barretts_FullSet"
 DEFAULT_POST_TRAIN_GRADCAM_THRESHOLDS = "0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9"
 PRETRAIN_LOSSES = {"supmin", "suppro"}
 SUPERVISED_LOSSES = {"ce", "class-balanced"}
@@ -80,7 +83,6 @@ def get_args_parser():
     parser.add_argument("--encoder-ckpt", type=str, default=None)
     parser.add_argument("--warmup-epochs", type=int, default=3)
 
-    parser.add_argument("--data-dir", type=str, default="./data")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -168,12 +170,6 @@ def get_args_parser():
     parser.set_defaults(pretrained=None)
 
     parser.add_argument(
-        "--testset-images-dir",
-        type=str,
-        default="./data/EVC_Barretts_FullSet/images",
-        help="Path to external testset images used for per-epoch testset metrics.",
-    )
-    parser.add_argument(
         "--segmentation-images-dir",
         type=str,
         default=None,
@@ -211,15 +207,6 @@ def get_args_parser():
         "--post-train-gradcam",
         action="store_true",
         help="Run the Barrett full-set Grad-CAM evaluator after baseline or finetune training.",
-    )
-    parser.add_argument(
-        "--post-train-gradcam-dataset-root",
-        type=str,
-        default=None,
-        help=(
-            "Root directory for the post-training Barrett Grad-CAM evaluation dataset. "
-            "Defaults to the parent directory of --testset-images-dir."
-        ),
     )
     parser.add_argument(
         "--post-train-gradcam-checkpoint",
@@ -261,6 +248,10 @@ def canonicalize_loss_name(loss_name):
 
 
 def resolve_runtime_config(args):
+    args.data_dir = DEFAULT_DATA_DIR
+    args.testset_images_dir = DEFAULT_TESTSET_IMAGES_DIR
+    args.post_train_gradcam_dataset_root = DEFAULT_POST_TRAIN_GRADCAM_DATASET_ROOT
+
     if args.loss_name is None:
         args.loss_name = args.method
     if args.loss_name is None:
@@ -376,7 +367,7 @@ def build_finetune_scheduler(optimizer, total_epochs):
 
 
 def resolve_post_train_gradcam_dataset_root(args):
-    return Path(args.post_train_gradcam_dataset_root or Path(args.testset_images_dir).parent)
+    return Path(args.post_train_gradcam_dataset_root)
 
 
 def validate_post_train_gradcam_dataset(args):

@@ -2,11 +2,9 @@
 
 set -euo pipefail
 
-# Fill these in first for new runs.
-# This tag is added in front of the auto-generated stage/backbone experiment ids.
-EXPERIMENT_ID="${EXPERIMENT_ID:-${EXPERIMENT_ID_PREFIX:-}}"
-# Set this when you want to use the exact experiment id without auto-appending stage details.
-EXPERIMENT_ID_EXACT="${EXPERIMENT_ID_EXACT:-}"
+# Fill this in first for new runs.
+# When set, this prefix is added in front of the auto-generated stage/backbone experiment ids.
+EXPERIMENT_ID="${EXPERIMENT_ID:-}"
 WANDB_GROUP="${WANDB_GROUP:-supcon}"
 
 # Crucial model choices.
@@ -30,10 +28,6 @@ LR="${LR:-1e-4}"
 WARMUP_EPOCHS="${WARMUP_EPOCHS:-3}"
 SEED="${SEED:-42}"
 
-# Shared paths and runtime defaults: these usually stay fixed across runs.
-DATA_DIR="${DATA_DIR:-./data/Challenge_train_data}"
-TESTSET_IMAGES_DIR="${TESTSET_IMAGES_DIR:-./data/EVC_Barretts_FullSet/images}"
-POST_TRAIN_GRADCAM_DATASET_ROOT="${POST_TRAIN_GRADCAM_DATASET_ROOT:-./data/EVC_Barretts_FullSet}"
 SAVE_DIR="${SAVE_DIR:-./checkpoints/linear_suppro_dual_backbone}"
 WANDB_PROJECT="${WANDB_PROJECT:-RARE25-Project}"
 NUM_WORKERS="${NUM_WORKERS:-10}"
@@ -64,8 +58,6 @@ build_common_args() {
         --wandb-group "${WANDB_GROUP}"
         --backbone-preset "${backbone}"
         --head-type "${HEAD_TYPE}"
-        --data-dir "${DATA_DIR}"
-        --testset-images-dir "${TESTSET_IMAGES_DIR}"
         --batch-size "${BATCH_SIZE}"
         --epochs "${epochs}"
         --lr "${LR}"
@@ -82,7 +74,7 @@ build_common_args() {
     fi
 
     if [ "${stage}" = "finetune" ]; then
-        args+=(--post-train-gradcam --post-train-gradcam-dataset-root "${POST_TRAIN_GRADCAM_DATASET_ROOT}")
+        args+=(--post-train-gradcam)
     fi
 
     printf '%s\n' "${args[@]}"
@@ -97,9 +89,7 @@ run_python_train() {
 
 build_experiment_id() {
     local base_id="$1"
-    if [ -n "${EXPERIMENT_ID_EXACT}" ]; then
-        printf '%s\n' "${EXPERIMENT_ID_EXACT}"
-    elif [ -n "${EXPERIMENT_ID}" ]; then
+    if [ -n "${EXPERIMENT_ID}" ]; then
         printf '%s_%s\n' "${EXPERIMENT_ID}" "${base_id}"
     else
         printf '%s\n' "${base_id}"
