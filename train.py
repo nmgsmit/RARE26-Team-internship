@@ -529,6 +529,22 @@ def run_post_training_gradcam(args, model, device, final_save_path, best_save_pa
     )
 
 
+def build_supervised_criterion(loss_name, train_ds, n_classes, device):
+    if loss_name == "ce":
+        print("Using standard cross entropy.")
+        return nn.CrossEntropyLoss()
+
+    train_labels = torch.tensor(train_ds.df["label"].tolist(), dtype=torch.long)
+    class_counts = torch.bincount(train_labels, minlength=n_classes).float()
+    if torch.any(class_counts == 0):
+        raise ValueError(f"At least one class has zero training samples: {class_counts.tolist()}")
+
+    class_weights = class_counts.sum() / (n_classes * class_counts)
+    class_weights = class_weights.to(device)
+    print(f"Using class-balanced cross entropy with weights: {class_weights.tolist()}")
+    return nn.CrossEntropyLoss(weight=class_weights)
+
+
 def configure_stage(model, args):
     if args.stage == "baseline":
         for parameter in model.proj_head.parameters():
