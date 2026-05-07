@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 
+if [ -z "${BASH_VERSION:-}" ]; then
+    exec bash "$0" "$@"
+fi
+
 set -euo pipefail
 
 # Fill this in first for new runs.
@@ -27,7 +31,9 @@ BATCH_SIZE="${BATCH_SIZE:-32}"
 PRETRAIN_EPOCHS="${PRETRAIN_EPOCHS:-50}"
 FINETUNE_EPOCHS="${FINETUNE_EPOCHS:-10}"
 
+LR="${LR:-1e-4}"
 BASELINE_LR="${BASELINE_LR:-1e-4}"
+PRETRAIN_BACKBONE_LR="${PRETRAIN_BACKBONE_LR:-${LR}}"
 PRETRAIN_PROJ_LR="${PRETRAIN_PROJ_LR:-3e-4}"
 FINETUNE_LR="${FINETUNE_LR:-3e-4}"
 
