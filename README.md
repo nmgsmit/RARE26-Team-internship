@@ -3,13 +3,16 @@
 This repository contains code and resources for the Team Internship project as part of the Master's program in Artificial Intelligence and Engineering Systems (AIES) at TU Eindhoven.
 
 Example run command:
-
-EXPERIMENT_ID=mlpfw_lr1em6_temp05 \
-BACKBONES_CSV=gastronet \
-HEAD_TYPE=mlp_fullwidth \
-PRETRAIN_LOSS=suppro \
-LR=1e-6 \
-TEMPERATURE=0.5 \
-PRETRAIN_EPOCHS=50 \
-BATCH_SIZE=32 \
-sbatch --export=EXPERIMENT_ID,BACKBONES_CSV,HEAD_TYPE,PRETRAIN_LOSS,LR,TEMPERATURE,BASE_TEMPERATURE,LAMBDA_SUPPRO,LAMBDA_SUPMIN,PRETRAIN_EPOCHS,BATCH_SIZE jobscript_slurm.sh
+ STAGES_CSV='pretrain,finetune' \
+ sbatch --export=ALL,\
+ EXPERIMENT_ID=P1_BB_GastronetDinoV2_t1,\
+ BACKBONES_CSV=gastronet,\
+ TEMPERATURE=0.07,\
+ PRETRAIN_BACKBONE_LR=1e-5,\
+ PRETRAIN_PROJ_LR=3e-4,\
+ FINETUNE_LR=3e-4,\
+ BATCH_SIZE=32,\
+ PRETRAIN_LOSS=suppro,\
+ WANDB_GROUP=backbonsuppo,\
+ EXPERIMENT_SAVE_SUBDIR=report_t1 \
+ jobscript_slurm.sh
