@@ -9,6 +9,7 @@ WANDB_GROUP="${WANDB_GROUP:-group}"
 
 # Easy checkpoint save configuration.
 CHECKPOINT_ROOT_DIR="${CHECKPOINT_ROOT_DIR:-./checkpoints}"
+EXPERIMENT_SAVE_SUBDIR="${EXPERIMENT_SAVE_SUBDIR:-default_experiment}"
 BASELINE_SAVE_SUBDIR="${BASELINE_SAVE_SUBDIR:-baselines}"
 PRETRAIN_SAVE_SUBDIR="${PRETRAIN_SAVE_SUBDIR:-pretrain}"
 FINETUNE_SAVE_SUBDIR="${FINETUNE_SAVE_SUBDIR:-finetune}"
@@ -65,9 +66,10 @@ for stage in "${STAGES[@]}"; do
     esac
 done
 
-BASELINE_SAVE_DIR="${CHECKPOINT_ROOT_DIR}/${BASELINE_SAVE_SUBDIR}"
-PRETRAIN_SAVE_DIR="${CHECKPOINT_ROOT_DIR}/${PRETRAIN_SAVE_SUBDIR}"
-FINETUNE_SAVE_DIR="${CHECKPOINT_ROOT_DIR}/${FINETUNE_SAVE_SUBDIR}"
+EXPERIMENT_SAVE_DIR="${CHECKPOINT_ROOT_DIR}/${EXPERIMENT_SAVE_SUBDIR}"
+BASELINE_SAVE_DIR="${EXPERIMENT_SAVE_DIR}/${BASELINE_SAVE_SUBDIR}"
+PRETRAIN_SAVE_DIR="${EXPERIMENT_SAVE_DIR}/${PRETRAIN_SAVE_SUBDIR}"
+FINETUNE_SAVE_DIR="${EXPERIMENT_SAVE_DIR}/${FINETUNE_SAVE_SUBDIR}"
 
 mkdir -p "${BASELINE_SAVE_DIR}" "${PRETRAIN_SAVE_DIR}" "${FINETUNE_SAVE_DIR}"
 
@@ -138,6 +140,8 @@ resolve_encoder_checkpoint() {
 
     local candidates=(
         "${primary_ckpt}"
+        "${EXPERIMENT_SAVE_DIR}/${pretrain_experiment_id}_encoder.pt"
+        "${EXPERIMENT_SAVE_DIR}/${base_pretrain_experiment_id}_encoder.pt"
         "${CHECKPOINT_ROOT_DIR}/${pretrain_experiment_id}_encoder.pt"
         "${CHECKPOINT_ROOT_DIR}/${base_pretrain_experiment_id}_encoder.pt"
     )
