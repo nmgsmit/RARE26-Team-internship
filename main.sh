@@ -15,7 +15,7 @@ FINETUNE_SAVE_SUBDIR="${FINETUNE_SAVE_SUBDIR:-finetune}"
 
 # Crucial model choices.
 # Supported entries in BACKBONES_CSV include: gastronet, dinov3, simclr, mocov2, resnet50
-BACKBONES_CSV="${BACKBONES_CSV:-gastronet,dinov3}" # gastronet, dinov3, simclr, mocov2, resnet50
+BACKBONES_CSV="${BACKBONES_CSV:-gastronet}" # gastronet, dinov3, simclr, mocov2, resnet50
 STAGES_CSV="${STAGES_CSV:-pretrain,finetune}" # baseline, pretrain, finetune
 PRETRAIN_LOSS="${PRETRAIN_LOSS:-suppro}"
 FINETUNE_LOSS="${FINETUNE_LOSS:-class-balanced}"
