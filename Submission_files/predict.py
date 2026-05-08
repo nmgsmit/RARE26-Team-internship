@@ -19,6 +19,11 @@ DEFAULT_MODEL_KWARGS = {
     "input_size": 336,
     "pretrained": False,
 }
+MODEL_METADATA_KEYS = {
+    "backbone_preset",
+    "num_folds",
+    "fold_index",
+}
 
 
 class TestDataset(Dataset):
@@ -52,6 +57,11 @@ def main():
     )
     model_kwargs["pretrained"] = False
     model_kwargs.pop("backbone_weights_path", None)
+    dropped_metadata = {
+        key: model_kwargs.pop(key)
+        for key in tuple(model_kwargs)
+        if key in MODEL_METADATA_KEYS
+    }
 
     input_size = int(model_kwargs.get("input_size", DEFAULT_MODEL_KWARGS["input_size"]))
     n_classes = int(model_kwargs.get("n_classes", DEFAULT_MODEL_KWARGS["n_classes"]))
@@ -72,6 +82,11 @@ def main():
         f"input_size={input_size} | n_classes={n_classes} | "
         f"head_type={model_kwargs.get('head_type', 'unknown')}"
     )
+    if dropped_metadata:
+        print(
+            "Ignoring non-architecture checkpoint metadata: "
+            + ", ".join(sorted(dropped_metadata))
+        )
     model = Model(
         **model_kwargs,
     ).to(device)
