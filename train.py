@@ -35,7 +35,7 @@ DEFAULT_DATA_DIR = "../data/Challenge_train_data"
 DEFAULT_TESTSET_IMAGES_DIR = "../data/EVC_Barretts_FullSet/images"
 DEFAULT_POST_TRAIN_GRADCAM_DATASET_ROOT = "../data/EVC_Barretts_FullSet"
 DEFAULT_POST_TRAIN_GRADCAM_THRESHOLDS = "0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9"
-PRETRAIN_LOSSES = {"supmin", "suppro"}
+PRETRAIN_LOSSES = {"supmin", "suppro", "supmix"}
 SUPERVISED_LOSSES = {"ce", "class-balanced"}
 LOSS_ALIASES = {
     "balanced": "class-balanced",
@@ -98,7 +98,7 @@ def get_args_parser():
         "--loss-name",
         type=str,
         default=None,
-        help="Loss selection: ce, class-balanced, supmin, or suppro.",
+        help="Loss selection: ce, class-balanced, supmin, suppro, or supmix.",
     )
     parser.add_argument("--method", type=str, default=None, help=SUPPRESS)
     parser.add_argument("--encoder-ckpt", type=str, default=None)
@@ -301,8 +301,8 @@ def get_args_parser():
     parser.add_argument("--post-train-gradcam-log-hard-neg-k", type=int, default=10)
 
     parser.add_argument("--lambda-ce", type=float, default=1.0, help=SUPPRESS)
-    parser.add_argument("--lambda-supmin", type=float, default=1.0, help=SUPPRESS)
-    parser.add_argument("--lambda-suppro", type=float, default=1.0, help=SUPPRESS)
+    parser.add_argument("--lambda-supmin", type=float, default=None, help=SUPPRESS)
+    parser.add_argument("--lambda-suppro", type=float, default=None, help=SUPPRESS)
 
     parser.set_defaults(gradcam_skip_empty_masks=True)
     return parser
@@ -314,6 +314,35 @@ def canonicalize_loss_name(loss_name):
 
     normalized = loss_name.strip().lower()
     return LOSS_ALIASES.get(normalized, normalized)
+
+
+def resolve_pretrain_loss_weights(args):
+    explicit_supmin = args.lambda_supmin is not None
+    explicit_suppro = args.lambda_suppro is not None
+
+    if args.loss_name == "supmix":
+        if not explicit_supmin and not explicit_suppro:
+            args.lambda_supmin = 0.5
+            args.lambda_suppro = 0.5
+        else:
+            args.lambda_supmin = 0.0 if args.lambda_supmin is None else args.lambda_supmin
+            args.lambda_suppro = 0.0 if args.lambda_suppro is None else args.lambda_suppro
+    elif explicit_supmin or explicit_suppro:
+        args.lambda_supmin = 0.0 if args.lambda_supmin is None else args.lambda_supmin
+        args.lambda_suppro = 0.0 if args.lambda_suppro is None else args.lambda_suppro
+    elif args.loss_name == "supmin":
+        args.lambda_supmin = 1.0
+        args.lambda_suppro = 0.0
+    else:
+        args.lambda_supmin = 0.0
+        args.lambda_suppro = 1.0
+
+    if args.lambda_supmin < 0.0:
+        raise ValueError(f"--lambda-supmin must be >= 0, got {args.lambda_supmin}.")
+    if args.lambda_suppro < 0.0:
+        raise ValueError(f"--lambda-suppro must be >= 0, got {args.lambda_suppro}.")
+    if args.lambda_supmin == 0.0 and args.lambda_suppro == 0.0:
+        raise ValueError("At least one pretrain loss weight must be > 0.")
 
 
 def resolve_runtime_config(args):
@@ -339,8 +368,8 @@ def resolve_runtime_config(args):
 
     if args.stage == "pretrain" and args.loss_name not in PRETRAIN_LOSSES:
         raise ValueError(
-            "Pretrain stage only supports SupMin or SupPro losses. "
-            "Use --loss-name supmin or --loss-name suppro."
+            "Pretrain stage only supports SupMin, SupPro, or mixed SupMin/SupPro. "
+            "Use --loss-name supmin, --loss-name suppro, or --loss-name supmix."
         )
     if args.stage != "pretrain" and args.loss_name not in SUPERVISED_LOSSES:
         raise ValueError(
@@ -376,6 +405,12 @@ def resolve_runtime_config(args):
         args.pretrain_proj_lr = 3e-4
     if args.finetune_lr is None:
         args.finetune_lr = 3e-4
+
+    if args.stage == "pretrain":
+        resolve_pretrain_loss_weights(args)
+    else:
+        args.lambda_supmin = 0.0
+        args.lambda_suppro = 0.0
 
     preset = BACKBONE_PRESETS[args.backbone_preset]
     if args.backbone_name is None:
@@ -630,6 +665,10 @@ def main(args):
             "Pretrain mode only learns the backbone and projection head. "
             "It saves an encoder checkpoint that you use later with --stage finetune."
         )
+        print(
+            f"Pretrain loss mix: lambda_suppro={args.lambda_suppro:.4f}, "
+            f"lambda_supmin={args.lambda_supmin:.4f}"
+        )
 
     if args.stage != "pretrain" and args.post_train_gradcam:
         validate_post_train_gradcam_dataset(args)
@@ -736,7 +775,10 @@ def main(args):
                 emb_pair = torch.stack([emb1, emb2], dim=1)
 
                 loss_ce = torch.tensor(0.0, device=device)
-                if args.loss_name == "suppro":
+                loss_supmin = torch.tensor(0.0, device=device)
+                loss_suppro = torch.tensor(0.0, device=device)
+
+                if args.lambda_suppro > 0.0:
                     with torch.no_grad():
                         class_counts = torch.bincount(labels, minlength=len(class_names)).float().to(device)
                         class_weights = 1.0 / torch.clamp(class_counts, min=1.0)
@@ -748,12 +790,10 @@ def main(args):
                         base_temperature=args.base_temperature,
                         class_weights=class_weights,
                     )
-                    loss_supmin = torch.tensor(0.0, device=device)
-                    loss = loss_suppro
-                else:
+                if args.lambda_supmin > 0.0:
                     loss_supmin = 0.5 * (supmin_loss(emb1, labels) + supmin_loss(emb2, labels))
-                    loss_suppro = torch.tensor(0.0, device=device)
-                    loss = loss_supmin
+
+                loss = (args.lambda_suppro * loss_suppro) + (args.lambda_supmin * loss_supmin)
 
                 preds = torch.zeros_like(labels)
             else:
@@ -799,6 +839,8 @@ def main(args):
                     "epoch": epoch + 1,
                     "stage": "pretrain",
                     "learning_rate": optimizer.param_groups[0]["lr"],
+                    "pretrain/lambda_supmin": args.lambda_supmin,
+                    "pretrain/lambda_suppro": args.lambda_suppro,
                     "pretrain/loss_total": avg_train_loss,
                     "pretrain/loss_ce": avg_train_ce,
                     "pretrain/loss_supmin": avg_train_supmin,
@@ -976,6 +1018,8 @@ def main(args):
                 "fold_index": args.fold_index,
                 "input_size": args.input_size,
                 "loss_name": args.loss_name,
+                "lambda_supmin": args.lambda_supmin,
+                "lambda_suppro": args.lambda_suppro,
                 "model_config": checkpoint_model_config,
             },
             encoder_path,

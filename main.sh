@@ -23,6 +23,8 @@ CV_NUM_FOLDS="${CV_NUM_FOLDS:-1}"
 PRETRAIN_LOSS="${PRETRAIN_LOSS:-suppro}"
 FINETUNE_LOSS="${FINETUNE_LOSS:-class-balanced}"
 HEAD_TYPE="${HEAD_TYPE:-linear}"
+LAMBDA_SUPMIN="${LAMBDA_SUPMIN:-}"
+LAMBDA_SUPPRO="${LAMBDA_SUPPRO:-}"
 
 # Training and optimization.
 TEMPERATURE="${TEMPERATURE:-0.07}"
@@ -110,6 +112,15 @@ build_common_args() {
         --temperature "${TEMPERATURE}"
         --base-temperature "${BASE_TEMPERATURE}"
     )
+
+    if [ "${stage}" = "pretrain" ]; then
+        if [ -n "${LAMBDA_SUPMIN}" ]; then
+            args+=(--lambda-supmin "${LAMBDA_SUPMIN}")
+        fi
+        if [ -n "${LAMBDA_SUPPRO}" ]; then
+            args+=(--lambda-suppro "${LAMBDA_SUPPRO}")
+        fi
+    fi
 
     if [ "${backbone}" = "gastronet" ]; then
         args+=(--backbone-weights-path "${GASTRONET_CKPT}")
