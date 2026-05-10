@@ -39,6 +39,22 @@ def _normalize_classifier_head_keys(state_dict):
     return state_dict
 
 
+def _infer_state_dict_backbone_prefix(state_dict):
+    if (
+        "backbone.conv1.weight" in state_dict
+        and "backbone.layer1.0.conv1.weight" in state_dict
+        and "backbone.layer4.2.conv3.weight" in state_dict
+    ):
+        return "backbone."
+    if (
+        "conv1.weight" in state_dict
+        and "layer1.0.conv1.weight" in state_dict
+        and "layer4.2.conv3.weight" in state_dict
+    ):
+        return ""
+    return None
+
+
 def _extract_backbone_state_dict(checkpoint):
     state_dict = _clean_state_dict_keys(_unwrap_checkpoint_state_dict(checkpoint))
     backbone_state = {}
@@ -166,6 +182,14 @@ def _infer_classifier_input_from_state_dict(state_dict, inferred_config):
 
 def infer_backbone_input_config_from_state_dict(state_dict):
     inferred = {}
+    resnet_prefix = _infer_state_dict_backbone_prefix(state_dict)
+    if resnet_prefix is not None:
+        conv1_weight = state_dict.get(f"{resnet_prefix}conv1.weight")
+        if conv1_weight is not None and conv1_weight.ndim == 4:
+            inferred["in_channels"] = int(conv1_weight.shape[1])
+            inferred.setdefault("input_size", 224)
+        return inferred
+
     patch_proj = state_dict.get("backbone.patch_embed.proj.weight")
     if patch_proj is None:
         return inferred
@@ -208,6 +232,15 @@ def infer_backbone_input_config_from_state_dict(state_dict):
         inferred["input_size"] = patch_grid * patch_height
 
     return inferred
+
+
+def infer_backbone_architecture_from_state_dict(state_dict):
+    if _infer_state_dict_backbone_prefix(state_dict) is not None:
+        return {
+            "backbone_name": "resnet50",
+            "pretrained": False,
+        }
+    return {}
 
 
 def infer_model_config_from_state_dict(state_dict):
@@ -271,6 +304,7 @@ def resolve_model_kwargs_from_checkpoint(checkpoint, fallback_kwargs=None):
             checkpoint_kwargs.update(raw_model_config)
 
     state_dict = extract_model_state_dict(checkpoint)
+    inferred_backbone_arch_kwargs = infer_backbone_architecture_from_state_dict(state_dict)
     inferred_backbone_kwargs = infer_backbone_input_config_from_state_dict(state_dict)
     inferred_kwargs = infer_model_config_from_state_dict(state_dict)
     inferred_kwargs["classifier_input"] = _infer_classifier_input_from_state_dict(
@@ -279,6 +313,7 @@ def resolve_model_kwargs_from_checkpoint(checkpoint, fallback_kwargs=None):
     inferred_kwargs.pop("classifier_input_dim", None)
 
     resolved_kwargs = dict(fallback_kwargs)
+    resolved_kwargs.update(inferred_backbone_arch_kwargs)
     resolved_kwargs.update(inferred_backbone_kwargs)
     resolved_kwargs.update(inferred_kwargs)
     resolved_kwargs.update(checkpoint_kwargs)
@@ -620,14 +655,25 @@ class Model(nn.Module):
         if pretrained is None:
             pretrained = backbone_weights_path is None
 
-        self.backbone = timm.create_model(
-            backbone_name,
+        backbone_kwargs = dict(
             pretrained=pretrained,
             num_classes=0,
             in_chans=in_channels,
-            img_size=input_size,
             **kwargs,
         )
+        try:
+            self.backbone = timm.create_model(
+                backbone_name,
+                img_size=input_size,
+                **backbone_kwargs,
+            )
+        except TypeError as exc:
+            if "img_size" not in str(exc):
+                raise
+            self.backbone = timm.create_model(
+                backbone_name,
+                **backbone_kwargs,
+            )
 
         if backbone_weights_path is not None:
             load_backbone_weights(self.backbone, backbone_weights_path)

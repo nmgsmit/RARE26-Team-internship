@@ -78,8 +78,6 @@ build_common_args() {
         --wandb-group "${WANDB_GROUP}"
         --backbone-preset "${backbone}"
         --head-type "${HEAD_TYPE}"
-        --data-dir "${DATA_DIR}"
-        --testset-images-dir "${TESTSET_IMAGES_DIR}"
         --batch-size "${BATCH_SIZE}"
         --epochs "${epochs}"
         --lr "${LR}"
@@ -175,10 +173,7 @@ run_plain_finetune() {
     )
     finetune_args+=(--encoder-ckpt "${encoder_ckpt}")
     if [ "${enable_post_train_gradcam}" = "1" ]; then
-        finetune_args+=(
-            --post-train-gradcam
-            --post-train-gradcam-dataset-root "${POST_TRAIN_GRADCAM_DATASET_ROOT}"
-        )
+        finetune_args+=(--post-train-gradcam)
     fi
     run_python_train "${finetune_args[@]}"
 }

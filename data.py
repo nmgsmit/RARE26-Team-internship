@@ -3,7 +3,7 @@ import os
 import pandas as pd
 import torch
 from PIL import Image
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from torch.utils.data import DataLoader, Dataset
 from torchvision.datasets import ImageFolder
 from torchvision.transforms.v2 import (
@@ -20,6 +20,8 @@ from torchvision.transforms.v2 import (
 )
 
 from roi_guidance import crop_image_to_roi
+
+DEFAULT_DATA_DIR = "../data/Challenge_train_data"
 
 
 class TwoViewDataset(Dataset):
@@ -59,8 +61,12 @@ class TwoViewDataset(Dataset):
         self.roi_guidance_active = False
 
     def get_roi_guidance_stats(self):
-        positive_image_paths = self.df.loc[self.df["label"] == self.roi_target_label, "img"].astype(str).tolist()
-        covered_records = [self.roi_records[path] for path in positive_image_paths if path in self.roi_records]
+        positive_image_paths = self.df.loc[
+            self.df["label"] == self.roi_target_label, "img"
+        ].astype(str).tolist()
+        covered_records = [
+            self.roi_records[path] for path in positive_image_paths if path in self.roi_records
+        ]
         source_counts = {}
         for record in covered_records:
             source = str(record.get("source", "unknown"))
@@ -69,7 +75,8 @@ class TwoViewDataset(Dataset):
         mean_coverage = 0.0
         if covered_records:
             mean_coverage = float(
-                sum(float(record.get("coverage", 0.0)) for record in covered_records) / len(covered_records)
+                sum(float(record.get("coverage", 0.0)) for record in covered_records)
+                / len(covered_records)
             )
 
         return {
@@ -84,7 +91,6 @@ class TwoViewDataset(Dataset):
         img_path = self.df.loc[idx, "img"]
         image = Image.open(img_path).convert("RGB")
         label = int(self.df.loc[idx, "label"])
-
         view1 = self.transform1(image)
         transform2 = self.transform2
         image2 = image
@@ -203,6 +209,9 @@ def build_train_val_dataframes(data_dir, test_size=0.2, random_state=42):
 
 def prepare_datasets(args, device):
     input_size = getattr(args, "input_size", 336)
+    data_dir = DEFAULT_DATA_DIR
+    num_folds = int(getattr(args, "num_folds", 1))
+    fold_index = int(getattr(args, "fold_index", 0))
     print(f"Using input size: {input_size}x{input_size}")
 
     train_transform_1 = Compose([
@@ -227,7 +236,38 @@ def prepare_datasets(args, device):
     ])
     train_roi_transform_2 = build_roi_focus_transform(input_size)
     valid_transform = build_eval_transform(input_size)
-    train_df, val_df, class_names = build_train_val_dataframes(args.data_dir)
+
+    df, class_names = build_dataset_dataframe(data_dir)
+    df["stratify_col"] = df["center"].astype(str) + "_" + df["label"].astype(str)
+
+    if num_folds <= 1:
+        train_df, val_df = train_test_split(
+            df,
+            test_size=0.2,
+            stratify=df["stratify_col"],
+            random_state=42,
+        )
+        print("Using single validation split (80/20 stratified).")
+    else:
+        if fold_index < 0 or fold_index >= num_folds:
+            raise ValueError(
+                f"fold_index must be in [0, {num_folds - 1}], got {fold_index}."
+            )
+        splitter = StratifiedKFold(
+            n_splits=num_folds,
+            shuffle=True,
+            random_state=getattr(args, "seed", 42),
+        )
+        split_indices = list(splitter.split(df, df["stratify_col"]))
+        train_indices, val_indices = split_indices[fold_index]
+        train_df = df.iloc[train_indices].copy()
+        val_df = df.iloc[val_indices].copy()
+        print(
+            f"Using {num_folds}-fold cross-validation | "
+            f"fold {fold_index + 1}/{num_folds} as validation."
+        )
+
+    val_df = val_df.reset_index(drop=True)
 
     train_ds = TwoViewDataset(
         train_df,

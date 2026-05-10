@@ -18,7 +18,7 @@ def get_args_parser():
     parser.add_argument(
         "--dataset-root",
         type=str,
-        default="./data/EVC_Barretts_FullSet",
+        default="../data/EVC_Barretts_FullSet",
         help="Root directory containing images and annotations_bmp.",
     )
     parser.add_argument("--input-size", type=int, default=224, help="Square input size used by the model.")
