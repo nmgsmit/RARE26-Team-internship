@@ -3,6 +3,7 @@ data/
 RARE25-Baselines/
 RARE25-Submissions/
 checkpoints/
+outputs/
 wandb/
 .env
 
