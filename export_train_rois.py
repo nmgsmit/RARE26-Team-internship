@@ -1,4 +1,5 @@
 from argparse import ArgumentParser
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,6 +9,14 @@ from data import build_train_val_dataframes
 from model import Model, load_model_checkpoint, resolve_model_kwargs_from_checkpoint
 from roi_guidance import save_roi_records_to_json
 from train import build_gradcam_roi_records
+
+
+def filter_model_kwargs_for_init(model_kwargs):
+    valid_keys = {
+        key for key in inspect.signature(Model.__init__).parameters
+        if key not in {"self", "kwargs"}
+    }
+    return {key: value for key, value in dict(model_kwargs).items() if key in valid_keys}
 
 
 def get_args_parser():
@@ -83,6 +92,7 @@ def main(args):
     )
 
     train_df, _, class_names = build_train_val_dataframes(args.data_dir)
+    resolved_model_kwargs = filter_model_kwargs_for_init(resolved_model_kwargs)
     resolved_model_kwargs["n_classes"] = len(class_names)
     effective_input_size = int(resolved_model_kwargs.get("input_size", args.input_size))
 
