@@ -1,5 +1,7 @@
 import os
+import random
 
+import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
@@ -20,6 +22,12 @@ from torchvision.transforms.v2 import (
 )
 
 DEFAULT_DATA_DIR = "../data/Challenge_train_data"
+
+
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % (2 ** 32)
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
 
 
 class TwoViewDataset(Dataset):
@@ -67,6 +75,7 @@ def prepare_datasets(args, device):
     data_dir = DEFAULT_DATA_DIR
     num_folds = int(getattr(args, "num_folds", 1))
     fold_index = int(getattr(args, "fold_index", 0))
+    data_seed = int(getattr(args, "seed", 42))
     print(f"Using input size: {input_size}x{input_size}")
 
     train_transform_1 = Compose([
@@ -91,11 +100,11 @@ def prepare_datasets(args, device):
     ])
     valid_transform = build_eval_transform(input_size)
 
-    centers = [
+    centers = sorted([
         folder
         for folder in os.listdir(data_dir)
         if folder.startswith("center") and os.path.isdir(os.path.join(data_dir, folder))
-    ]
+    ])
     if not centers:
         raise ValueError(f"No center folders found in {data_dir}.")
 
@@ -114,12 +123,13 @@ def prepare_datasets(args, device):
         if class_names is None:
             class_names = list(ds.class_to_idx.keys())
 
-        for img_path, label in ds.samples:
+        for img_path, label in sorted(ds.samples):
             all_images.append(img_path)
             all_labels.append(label)
             all_centers.append(center)
 
     df = pd.DataFrame({"img": all_images, "label": all_labels, "center": all_centers})
+    df = df.sort_values(["center", "img", "label"], kind="mergesort").reset_index(drop=True)
     df["stratify_col"] = df["center"].astype(str) + "_" + df["label"].astype(str)
 
     if num_folds <= 1:
@@ -127,7 +137,7 @@ def prepare_datasets(args, device):
             df,
             test_size=0.2,
             stratify=df["stratify_col"],
-            random_state=42,
+            random_state=data_seed,
         )
         print("Using single validation split (80/20 stratified).")
     else:
@@ -138,7 +148,7 @@ def prepare_datasets(args, device):
         splitter = StratifiedKFold(
             n_splits=num_folds,
             shuffle=True,
-            random_state=getattr(args, "seed", 42),
+            random_state=data_seed,
         )
         split_indices = list(splitter.split(df, df["stratify_col"]))
         train_indices, val_indices = split_indices[fold_index]
@@ -150,20 +160,26 @@ def prepare_datasets(args, device):
         )
 
     val_df = val_df.reset_index(drop=True)
+    train_df = train_df.reset_index(drop=True)
 
     train_ds = TwoViewDataset(train_df, train_transform_1, train_transform_2)
     valid_ds = SimpleDataset(val_df, valid_transform)
+    train_generator = torch.Generator()
+    train_generator.manual_seed(data_seed)
 
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
+        worker_init_fn=seed_worker,
+        generator=train_generator,
     )
     valid_loader = DataLoader(
         valid_ds,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
+        worker_init_fn=seed_worker,
     )
     return train_loader, valid_loader, train_ds, valid_ds, class_names

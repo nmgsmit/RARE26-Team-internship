@@ -1,4 +1,5 @@
 import os
+import random
 from argparse import SUPPRESS, ArgumentParser
 from pathlib import Path
 
@@ -85,6 +86,30 @@ HEAD_TYPE_CHOICES = (
 )
 
 
+def seed_everything(seed, deterministic=True):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.deterministic = deterministic
+    torch.backends.cudnn.benchmark = False if deterministic else torch.backends.cudnn.benchmark
+
+    if hasattr(torch.backends.cuda, "matmul"):
+        torch.backends.cuda.matmul.allow_tf32 = False
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.allow_tf32 = False
+
+    if deterministic:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        torch.use_deterministic_algorithms(True)
+    else:
+        torch.use_deterministic_algorithms(False)
+
+
 def get_args_parser():
     parser = ArgumentParser("RARE25 configurable staged training")
     parser.add_argument(
@@ -145,6 +170,20 @@ def get_args_parser():
         help="Zero-based validation fold index when --num-folds > 1.",
     )
     parser.add_argument("--seed", type=int, default=42)
+    deterministic_group = parser.add_mutually_exclusive_group()
+    deterministic_group.add_argument(
+        "--deterministic",
+        dest="deterministic",
+        action="store_true",
+        help="Force deterministic training behavior for stronger reproducibility.",
+    )
+    deterministic_group.add_argument(
+        "--no-deterministic",
+        dest="deterministic",
+        action="store_false",
+        help="Allow nondeterministic kernels for faster but less reproducible training.",
+    )
+    parser.set_defaults(deterministic=True)
     parser.add_argument("--experiment-id", type=str, default="rare25-run")
     parser.add_argument("--save-dir", type=str, default="./checkpoints")
     parser.add_argument(
@@ -643,8 +682,7 @@ def main(args):
     )
 
     os.makedirs(args.save_dir, exist_ok=True)
-    torch.manual_seed(args.seed)
-    torch.backends.cudnn.deterministic = True
+    seed_everything(args.seed, deterministic=args.deterministic)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print(
@@ -659,6 +697,9 @@ def main(args):
     print(
         f"Head: {args.head_type} | head hidden dim: {args.head_hidden_dim} | "
         f"MLP hidden layers: {args.mlp_hidden_layers} | MLP hidden dim: {args.mlp_hidden_dim}"
+    )
+    print(
+        f"Seed: {args.seed} | deterministic mode: {'on' if args.deterministic else 'off'}"
     )
     if args.stage == "pretrain":
         print(
