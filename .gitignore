@@ -5,7 +5,6 @@ RARE25-Submissions/
 checkpoints/
 wandb/
 .env
-outputs/
 
 # Large artifacts
 *.tar
