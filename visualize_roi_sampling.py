@@ -276,6 +276,29 @@ def build_random_crop_tile(image, random_crop_bbox, tile_size, caption):
     return canvas
 
 
+def build_masked_roi_tile(image, bbox, tile_size, caption):
+    image = image.convert("RGB")
+    width, height = image.size
+    x0, y0, x1, y1 = [float(value) for value in bbox]
+
+    left = max(0, min(width - 1, int(round(x0 * width))))
+    top = max(0, min(height - 1, int(round(y0 * height))))
+    right = max(left + 1, min(width, int(round(x1 * width))))
+    bottom = max(top + 1, min(height, int(round(y1 * height))))
+
+    masked = image.copy()
+    draw = ImageDraw.Draw(masked)
+    draw.rectangle([left, top, right, bottom], fill="black")
+    tile = fit_square(masked, tile_size)
+
+    caption_height = 34
+    canvas = Image.new("RGB", (tile_size, tile_size + caption_height), "white")
+    canvas.paste(tile, (0, 0))
+    draw = ImageDraw.Draw(canvas)
+    draw_text_block(draw, (8, tile_size + 6), caption, fill="black", font=get_font())
+    return canvas
+
+
 def assemble_grid(tiles, grid_size, title):
     if not tiles:
         raise ValueError("No tiles were provided for the grid.")
@@ -338,6 +361,7 @@ def main():
     overlay_tiles = []
     crop_tiles = []
     random_crop_tiles = []
+    masked_roi_tiles = []
     rng = random.Random(args.random_seed)
 
     for index, (image_path_str, record) in enumerate(selected_records, start=1):
@@ -379,6 +403,14 @@ def main():
                 caption=caption,
             )
         )
+        masked_roi_tiles.append(
+            build_masked_roi_tile(
+                image=image,
+                bbox=record["bbox"],
+                tile_size=args.tile_size,
+                caption=caption,
+            )
+        )
 
     input_size = metadata.get("input_size", "unknown")
     overlay_title = (
@@ -393,21 +425,26 @@ def main():
         f"Random crops with ROI-matched size | seed={args.random_seed} | "
         f"context_scale={args.context_scale} | min_crop_scale={args.min_crop_scale}"
     )
+    masked_roi_title = "Original images with ROI masked out by black box"
 
     overlay_grid = assemble_grid(overlay_tiles, args.grid_size, overlay_title)
     crop_grid = assemble_grid(crop_tiles, args.grid_size, crop_title)
     random_crop_grid = assemble_grid(random_crop_tiles, args.grid_size, random_crop_title)
+    masked_roi_grid = assemble_grid(masked_roi_tiles, args.grid_size, masked_roi_title)
 
     overlay_output_path = output_dir / "roi_gradcam_overlay_grid.png"
     crop_output_path = output_dir / "roi_sampler_crop_grid.png"
     random_crop_output_path = output_dir / "random_sampler_crop_grid.png"
+    masked_roi_output_path = output_dir / "roi_masked_black_box_grid.png"
     overlay_grid.save(overlay_output_path)
     crop_grid.save(crop_output_path)
     random_crop_grid.save(random_crop_output_path)
+    masked_roi_grid.save(masked_roi_output_path)
 
     print(f"Saved Grad-CAM overlay grid to {overlay_output_path}")
     print(f"Saved ROI sampler crop grid to {crop_output_path}")
     print(f"Saved random crop grid to {random_crop_output_path}")
+    print(f"Saved ROI-masked black-box grid to {masked_roi_output_path}")
 
 
 if __name__ == "__main__":
