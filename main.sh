@@ -23,6 +23,17 @@ CV_NUM_FOLDS="${CV_NUM_FOLDS:-1}"
 PRETRAIN_LOSS="${PRETRAIN_LOSS:-suppro}"
 FINETUNE_LOSS="${FINETUNE_LOSS:-class-balanced}"
 HEAD_TYPE="${HEAD_TYPE:-linear}"
+SUPERVISED_ABLATIONS_CSV="${SUPERVISED_ABLATIONS_CSV:-}"
+BALANCED_SAMPLER="${BALANCED_SAMPLER:-1}"
+ROI_RECORDS_PATH="${ROI_RECORDS_PATH:-}"
+LAMBDA_PROTO_GLOBAL="${LAMBDA_PROTO_GLOBAL:-0.25}"
+LAMBDA_LOCAL="${LAMBDA_LOCAL:-0.25}"
+PROTO_TEMPERATURE="${PROTO_TEMPERATURE:-0.1}"
+ROI_HARDNESS_ALPHA_MIN="${ROI_HARDNESS_ALPHA_MIN:-0.25}"
+ROI_HARDNESS_ALPHA_MAX="${ROI_HARDNESS_ALPHA_MAX:-1.0}"
+SUPPRO_ROI="${SUPPRO_ROI:-0}"
+SUPPRO_ROI_WEIGHT="${SUPPRO_ROI_WEIGHT:-0.2}"
+SUPPRO_ROI_WARMUP_EPOCHS="${SUPPRO_ROI_WARMUP_EPOCHS:-0}"
 
 # Training and optimization.
 TEMPERATURE="${TEMPERATURE:-0.07}"
@@ -58,6 +69,7 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 IFS=',' read -r -a BACKBONES <<< "${BACKBONES_CSV}"
 IFS=',' read -r -a STAGES <<< "${STAGES_CSV}"
+IFS=',' read -r -a SUPERVISED_ABLATIONS <<< "${SUPERVISED_ABLATIONS_CSV}"
 
 if [ -n "${PRETRAIN_CHECKPOINT}" ] && [ "${#BACKBONES[@]}" -gt 1 ]; then
     echo "PRETRAIN_CHECKPOINT expects a single backbone run. Set BACKBONES_CSV to one backbone or leave PRETRAIN_CHECKPOINT blank." >&2
@@ -73,6 +85,19 @@ for stage in "${STAGES[@]}"; do
             ;;
     esac
 done
+
+if [ -n "${SUPERVISED_ABLATIONS_CSV}" ]; then
+    for variant in "${SUPERVISED_ABLATIONS[@]}"; do
+        case "${variant}" in
+            global-only|global-proto|roi-aux|roi-aux-hardness) ;;
+            *)
+                echo "Unsupported supervised ablation in SUPERVISED_ABLATIONS_CSV: ${variant}." >&2
+                echo "Use global-only, global-proto, roi-aux, or roi-aux-hardness." >&2
+                exit 1
+                ;;
+        esac
+    done
+fi
 
 EXPERIMENT_SAVE_DIR="${CHECKPOINT_ROOT_DIR}/${EXPERIMENT_SAVE_SUBDIR}"
 
@@ -127,7 +152,56 @@ build_common_args() {
         args+=(--post-train-gradcam)
     fi
 
+    if [ "${BALANCED_SAMPLER}" = "1" ] && [ "${stage}" = "pretrain" ]; then
+        args+=(--balanced-sampler)
+    fi
+
     printf '%s\n' "${args[@]}"
+}
+
+append_supervised_ablation_args() {
+    local variant="$1"
+    local -n args_ref=$2
+
+    args_ref+=(--supervised-ablation-mode "${variant}")
+    args_ref+=(--lambda-proto-global "${LAMBDA_PROTO_GLOBAL}")
+    args_ref+=(--lambda-local "${LAMBDA_LOCAL}")
+    args_ref+=(--proto-temperature "${PROTO_TEMPERATURE}")
+    args_ref+=(--roi-hardness-alpha-min "${ROI_HARDNESS_ALPHA_MIN}")
+    args_ref+=(--roi-hardness-alpha-max "${ROI_HARDNESS_ALPHA_MAX}")
+
+    if [ "${BALANCED_SAMPLER}" = "1" ]; then
+        args_ref+=(--balanced-sampler)
+    fi
+
+    if [ "${variant}" = "roi-aux" ] || [ "${variant}" = "roi-aux-hardness" ]; then
+        if [ -z "${ROI_RECORDS_PATH}" ]; then
+            echo "ROI_RECORDS_PATH must be set for supervised ROI ablations." >&2
+            exit 1
+        fi
+        args_ref+=(--roi-records-path "${ROI_RECORDS_PATH}")
+    fi
+}
+
+append_suppro_roi_args() {
+    local -n args_ref=$1
+
+    if [ "${SUPPRO_ROI}" != "1" ]; then
+        return 0
+    fi
+
+    if [ -z "${ROI_RECORDS_PATH}" ]; then
+        echo "ROI_RECORDS_PATH must be set when SUPPRO_ROI=1." >&2
+        exit 1
+    fi
+
+    args_ref+=(
+        --suppro-roi
+        --suppro-roi-weight "${SUPPRO_ROI_WEIGHT}"
+        --suppro-roi-warmup-epochs "${SUPPRO_ROI_WARMUP_EPOCHS}"
+        --roi-records-path "${ROI_RECORDS_PATH}"
+    )
+
 }
 
 run_python_train() {
@@ -185,6 +259,9 @@ for backbone in "${BACKBONES[@]}"; do
         mkdir -p "${BASELINE_SAVE_DIR}" "${PRETRAIN_SAVE_DIR}" "${FINETUNE_SAVE_DIR}"
 
         base_pretrain_experiment_id="${backbone}_pretrain_${PRETRAIN_LOSS}"
+        if [ "${SUPPRO_ROI}" = "1" ]; then
+            base_pretrain_experiment_id="${base_pretrain_experiment_id}_roi"
+        fi
         pretrain_experiment_id="$(build_experiment_id "${base_pretrain_experiment_id}" "pretrain")"
         encoder_ckpt="${PRETRAIN_SAVE_DIR}/${pretrain_experiment_id}_encoder.pt"
 
@@ -204,12 +281,24 @@ for backbone in "${BACKBONES[@]}"; do
             if [ "${CV_NUM_FOLDS}" -gt 1 ]; then
                 echo "Running fold $((fold_index + 1))/${CV_NUM_FOLDS} for backbone ${backbone}"
             fi
-            base_baseline_experiment_id="${backbone}_baseline_${FINETUNE_LOSS}_${HEAD_TYPE}"
-            baseline_experiment_id="$(build_experiment_id "${base_baseline_experiment_id}" "baseline")"
-            mapfile -t baseline_args < <(
-                build_common_args "baseline" "${backbone}" "${FINETUNE_LOSS}" "${baseline_experiment_id}" "${FINETUNE_EPOCHS}" "${BASELINE_SAVE_DIR}" "${CV_NUM_FOLDS}" "${fold_index}"
-            )
-            run_python_train "${baseline_args[@]}"
+            if [ -n "${SUPERVISED_ABLATIONS_CSV}" ]; then
+                for variant in "${SUPERVISED_ABLATIONS[@]}"; do
+                    base_baseline_experiment_id="${backbone}_baseline_${FINETUNE_LOSS}_${HEAD_TYPE}_${variant}"
+                    baseline_experiment_id="$(build_experiment_id "${base_baseline_experiment_id}" "baseline")"
+                    mapfile -t baseline_args < <(
+                        build_common_args "baseline" "${backbone}" "${FINETUNE_LOSS}" "${baseline_experiment_id}" "${FINETUNE_EPOCHS}" "${BASELINE_SAVE_DIR}" "${CV_NUM_FOLDS}" "${fold_index}"
+                    )
+                    append_supervised_ablation_args "${variant}" baseline_args
+                    run_python_train "${baseline_args[@]}"
+                done
+            else
+                base_baseline_experiment_id="${backbone}_baseline_${FINETUNE_LOSS}_${HEAD_TYPE}"
+                baseline_experiment_id="$(build_experiment_id "${base_baseline_experiment_id}" "baseline")"
+                mapfile -t baseline_args < <(
+                    build_common_args "baseline" "${backbone}" "${FINETUNE_LOSS}" "${baseline_experiment_id}" "${FINETUNE_EPOCHS}" "${BASELINE_SAVE_DIR}" "${CV_NUM_FOLDS}" "${fold_index}"
+                )
+                run_python_train "${baseline_args[@]}"
+            fi
         fi
 
         if [ "${run_pretrain_stage}" = "1" ] || [ "${run_finetune_stage}" = "1" ]; then
@@ -219,6 +308,7 @@ for backbone in "${BACKBONES[@]}"; do
                 mapfile -t pretrain_args < <(
                     build_common_args "pretrain" "${backbone}" "${PRETRAIN_LOSS}" "${pretrain_experiment_id}" "${PRETRAIN_EPOCHS}" "${PRETRAIN_SAVE_DIR}" "${CV_NUM_FOLDS}" "${fold_index}"
                 )
+                append_suppro_roi_args pretrain_args
                 run_python_train "${pretrain_args[@]}"
             elif [ "${run_pretrain_stage}" = "1" ] && [ -n "${PRETRAIN_CHECKPOINT}" ]; then
                 if [ ! -f "${PRETRAIN_CHECKPOINT}" ]; then
@@ -232,6 +322,7 @@ for backbone in "${BACKBONES[@]}"; do
                 mapfile -t pretrain_args < <(
                     build_common_args "pretrain" "${backbone}" "${PRETRAIN_LOSS}" "${pretrain_experiment_id}" "${PRETRAIN_EPOCHS}" "${PRETRAIN_SAVE_DIR}" "${CV_NUM_FOLDS}" "${fold_index}"
                 )
+                append_suppro_roi_args pretrain_args
                 run_python_train "${pretrain_args[@]}"
             elif [ -n "${PRETRAIN_CHECKPOINT}" ]; then
                 if [ ! -f "${PRETRAIN_CHECKPOINT}" ]; then
@@ -255,13 +346,29 @@ for backbone in "${BACKBONES[@]}"; do
 
         if [ "${run_finetune_stage}" = "1" ]; then
             echo
-            base_finetune_experiment_id="${backbone}_finetune_${PRETRAIN_LOSS}_${FINETUNE_LOSS}_${HEAD_TYPE}"
-            finetune_experiment_id="$(build_experiment_id "${base_finetune_experiment_id}" "finetune")"
-            mapfile -t finetune_args < <(
-                build_common_args "finetune" "${backbone}" "${FINETUNE_LOSS}" "${finetune_experiment_id}" "${FINETUNE_EPOCHS}" "${FINETUNE_SAVE_DIR}" "${CV_NUM_FOLDS}" "${fold_index}"
-            )
-            finetune_args+=(--encoder-ckpt "${encoder_ckpt}")
-            run_python_train "${finetune_args[@]}"
+            if [ -n "${SUPERVISED_ABLATIONS_CSV}" ]; then
+                for variant in "${SUPERVISED_ABLATIONS[@]}"; do
+                    base_finetune_experiment_id="${backbone}_finetune_${PRETRAIN_LOSS}_${FINETUNE_LOSS}_${HEAD_TYPE}_${variant}"
+                    finetune_experiment_id="$(build_experiment_id "${base_finetune_experiment_id}" "finetune")"
+                    mapfile -t finetune_args < <(
+                        build_common_args "finetune" "${backbone}" "${FINETUNE_LOSS}" "${finetune_experiment_id}" "${FINETUNE_EPOCHS}" "${FINETUNE_SAVE_DIR}" "${CV_NUM_FOLDS}" "${fold_index}"
+                    )
+                    append_supervised_ablation_args "${variant}" finetune_args
+                    finetune_args+=(--encoder-ckpt "${encoder_ckpt}")
+                    run_python_train "${finetune_args[@]}"
+                done
+            else
+                base_finetune_experiment_id="${backbone}_finetune_${PRETRAIN_LOSS}_${FINETUNE_LOSS}_${HEAD_TYPE}"
+                if [ "${SUPPRO_ROI}" = "1" ]; then
+                    base_finetune_experiment_id="${base_finetune_experiment_id}_roi"
+                fi
+                finetune_experiment_id="$(build_experiment_id "${base_finetune_experiment_id}" "finetune")"
+                mapfile -t finetune_args < <(
+                    build_common_args "finetune" "${backbone}" "${FINETUNE_LOSS}" "${finetune_experiment_id}" "${FINETUNE_EPOCHS}" "${FINETUNE_SAVE_DIR}" "${CV_NUM_FOLDS}" "${fold_index}"
+                )
+                finetune_args+=(--encoder-ckpt "${encoder_ckpt}")
+                run_python_train "${finetune_args[@]}"
+            fi
         fi
     done
 done

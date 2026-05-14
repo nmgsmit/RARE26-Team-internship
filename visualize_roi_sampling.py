@@ -1,8 +1,10 @@
 import argparse
+import json
 from pathlib import Path
 
 from PIL import Image, ImageColor, ImageDraw, ImageFont
 
+from data import DEFAULT_DATA_DIR, build_dataset_dataframe
 from roi_guidance import (
     DEFAULT_ROI_MAX_ASPECT_RATIO,
     compute_crop_window_from_roi,
@@ -37,7 +39,7 @@ def parse_args():
     parser.add_argument(
         "--grid-size",
         type=int,
-        default=12,
+        default=8,
         help="Number of rows and columns in the preview grid.",
     )
     parser.add_argument(
@@ -67,12 +69,27 @@ def parse_args():
             "Defaults to the value stored in the ROI JSON metadata, or 1.5 if absent."
         ),
     )
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=DEFAULT_DATA_DIR,
+        help=(
+            "Training data directory used to fetch negative ndbe images for the "
+            "negative-only crop preview."
+        ),
+    )
     return parser.parse_args()
 
 
 def load_roi_payload(roi_json_path):
     roi_records, metadata = load_roi_records_from_json(roi_json_path)
     return metadata, roi_records
+
+
+def load_gradcam_results(roi_json_path):
+    with roi_json_path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    return list(payload.get("gradcam_results", []))
 
 
 def flatten_roi_entries(roi_records):
@@ -126,8 +143,59 @@ def resolve_image_path(image_path_str, roi_json_path):
     )
 
 
+def resolve_existing_path(path_str, roi_json_path):
+    return resolve_image_path(path_str, roi_json_path)
+
+
 def select_records(roi_entries, max_images):
     return list(roi_entries)[:max_images]
+
+
+def load_negative_image_paths(data_dir, roi_json_path, gradcam_results=None):
+    resolved_data_dir = resolve_existing_path(sanitize_path_arg(data_dir), roi_json_path)
+    dataset_df, _class_names = build_dataset_dataframe(str(resolved_data_dir))
+    negative_df = dataset_df.loc[dataset_df["label"] == 0].copy()
+    negative_df["img"] = negative_df["img"].astype(str)
+
+    negative_records = []
+    for image_path in negative_df["img"].tolist():
+        negative_records.append(
+            {
+                "img": str(image_path),
+                "positive_prob": None,
+                "source": "dataset",
+            }
+        )
+
+    score_by_resolved_path = {}
+    for result in gradcam_results or []:
+        if int(result.get("label", -1)) != 0:
+            continue
+        img_path = result.get("img")
+        if not img_path:
+            continue
+        try:
+            resolved_img_path = str(resolve_image_path(str(img_path), roi_json_path))
+        except FileNotFoundError:
+            continue
+        score_by_resolved_path[resolved_img_path] = float(result.get("positive_prob", 0.0))
+
+    for record in negative_records:
+        try:
+            resolved_path = str(resolve_image_path(record["img"], roi_json_path))
+        except FileNotFoundError:
+            continue
+        if resolved_path in score_by_resolved_path:
+            record["positive_prob"] = score_by_resolved_path[resolved_path]
+            record["source"] = "gradcam_results"
+
+    negative_records.sort(
+        key=lambda record: (
+            -(record["positive_prob"] if record["positive_prob"] is not None else -1.0),
+            record["img"],
+        )
+    )
+    return negative_records, resolved_data_dir
 
 
 def get_font():
@@ -212,10 +280,68 @@ def crop_image_to_window(image, window_bbox):
     return image.crop((left_px, top_px, right_px, bottom_px))
 
 
+def build_centered_crop_window_like(crop_bbox):
+    left, top, right, bottom = [float(value) for value in crop_bbox]
+    crop_width = max(1e-6, right - left)
+    crop_height = max(1e-6, bottom - top)
+    center_x = 0.5
+    center_y = 0.5
+    centered_left = min(max(center_x - 0.5 * crop_width, 0.0), 1.0 - crop_width)
+    centered_top = min(max(center_y - 0.5 * crop_height, 0.0), 1.0 - crop_height)
+    return (
+        centered_left,
+        centered_top,
+        centered_left + crop_width,
+        centered_top + crop_height,
+    )
+
+
 def build_source_roi_crop_tile(image, roi_record, tile_size, caption):
     source_bbox = roi_record.get("source_bbox", roi_record["bbox"])
     crop = crop_image_to_window(image=image, window_bbox=source_bbox).convert("RGB")
     tile = fit_square(crop, tile_size)
+
+    caption_height = 34
+    canvas = Image.new("RGB", (tile_size, tile_size + caption_height), "white")
+    canvas.paste(tile, (0, 0))
+    draw = ImageDraw.Draw(canvas)
+    draw_text_block(draw, (8, tile_size + 6), caption, fill="black", font=get_font())
+    return canvas
+
+
+def build_negative_crop_tile(image, crop_bbox, tile_size, caption):
+    centered_crop_bbox = build_centered_crop_window_like(crop_bbox)
+    crop = crop_image_to_window(image=image, window_bbox=centered_crop_bbox).convert("RGB")
+    tile = fit_square(crop, tile_size)
+
+    caption_height = 34
+    canvas = Image.new("RGB", (tile_size, tile_size + caption_height), "white")
+    canvas.paste(tile, (0, 0))
+    draw = ImageDraw.Draw(canvas)
+    draw_text_block(draw, (8, tile_size + 6), caption, fill="black", font=get_font())
+    return canvas
+
+
+def build_negative_overlay_tile(image, crop_bbox, tile_size, caption):
+    image = image.convert("RGB")
+    width, height = image.size
+    cx0, cy0, cx1, cy1 = [float(value) for value in build_centered_crop_window_like(crop_bbox)]
+
+    crop_left = max(0, min(width - 1, int(round(cx0 * width))))
+    crop_top = max(0, min(height - 1, int(round(cy0 * height))))
+    crop_right = max(crop_left + 1, min(width, int(round(cx1 * width))))
+    crop_bottom = max(crop_top + 1, min(height, int(round(cy1 * height))))
+
+    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+    overlay_draw.rectangle(
+        [crop_left, crop_top, crop_right, crop_bottom],
+        fill=ImageColor.getrgb("#2ec4b6") + (70,),
+        outline=ImageColor.getrgb("#00d4ff") + (255,),
+        width=max(2, width // 120),
+    )
+    composite = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
+    tile = fit_square(composite, tile_size)
 
     caption_height = 34
     canvas = Image.new("RGB", (tile_size, tile_size + caption_height), "white")
@@ -275,7 +401,13 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     metadata, roi_records = load_roi_payload(roi_json_path)
+    gradcam_results = load_gradcam_results(roi_json_path)
     roi_entries = flatten_roi_entries(roi_records)
+    negative_records, resolved_data_dir = load_negative_image_paths(
+        args.data_dir,
+        roi_json_path,
+        gradcam_results=gradcam_results,
+    )
     max_aspect_ratio = float(
         args.max_aspect_ratio
         if args.max_aspect_ratio is not None
@@ -292,6 +424,8 @@ def main():
     overlay_tiles = []
     crop_tiles = []
     source_roi_crop_tiles = []
+    negative_overlay_tiles = []
+    negative_crop_tiles = []
 
     for index, (image_path_str, record) in enumerate(selected_records, start=1):
         image_path = resolve_image_path(image_path_str, roi_json_path)
@@ -333,6 +467,37 @@ def main():
                 caption=caption,
             )
         )
+        if index <= len(negative_records):
+            negative_record = negative_records[index - 1]
+            negative_image_path_str = negative_record["img"]
+            negative_image_path = resolve_image_path(negative_image_path_str, roi_json_path)
+            negative_image = Image.open(negative_image_path).convert("RGB")
+            negative_prob = negative_record.get("positive_prob")
+            prob_text = (
+                f"p(neo)={negative_prob:.3f}"
+                if negative_prob is not None
+                else "p(neo)=n/a"
+            )
+            negative_caption = (
+                f"{index:02d} {Path(negative_image_path_str).stem[:14]}\n"
+                f"ndbe | {prob_text}"
+            )
+            negative_crop_tiles.append(
+                build_negative_crop_tile(
+                    image=negative_image,
+                    crop_bbox=crop_bbox,
+                    tile_size=args.tile_size,
+                    caption=negative_caption,
+                )
+            )
+            negative_overlay_tiles.append(
+                build_negative_overlay_tile(
+                    image=negative_image,
+                    crop_bbox=crop_bbox,
+                    tile_size=args.tile_size,
+                    caption=negative_caption,
+                )
+            )
 
     input_size = metadata.get("input_size", "unknown")
     overlay_title = (
@@ -347,21 +512,37 @@ def main():
         "Direct source-ROI crops | "
         "order=json-top-down"
     )
+    negative_crop_title = (
+        "Negative-only crops | hardest ndbe first by predicted neo probability | "
+        f"matched ROI crop sizes | data_dir={resolved_data_dir.name}"
+    )
+    negative_overlay_title = (
+        "Hard-negative full images with matched crop window overlay | "
+        "hardest ndbe first by predicted neo probability"
+    )
 
     overlay_grid = assemble_grid(overlay_tiles, args.grid_size, overlay_title)
     crop_grid = assemble_grid(crop_tiles, args.grid_size, crop_title)
     source_roi_crop_grid = assemble_grid(source_roi_crop_tiles, args.grid_size, source_roi_crop_title)
+    negative_overlay_grid = assemble_grid(negative_overlay_tiles, args.grid_size, negative_overlay_title)
+    negative_crop_grid = assemble_grid(negative_crop_tiles, args.grid_size, negative_crop_title)
 
     overlay_output_path = output_dir / "roi_gradcam_overlay_grid.png"
     crop_output_path = output_dir / "roi_sampler_crop_grid.png"
     source_roi_crop_output_path = output_dir / "source_roi_crop_grid.png"
+    negative_overlay_output_path = output_dir / "negative_sampler_overlay_grid.png"
+    negative_crop_output_path = output_dir / "negative_sampler_matched_crop_grid.png"
     overlay_grid.save(overlay_output_path)
     crop_grid.save(crop_output_path)
     source_roi_crop_grid.save(source_roi_crop_output_path)
+    negative_overlay_grid.save(negative_overlay_output_path)
+    negative_crop_grid.save(negative_crop_output_path)
 
     print(f"Saved Grad-CAM overlay grid to {overlay_output_path}")
     print(f"Saved ROI sampler crop grid to {crop_output_path}")
     print(f"Saved source ROI crop grid to {source_roi_crop_output_path}")
+    print(f"Saved negative overlay grid to {negative_overlay_output_path}")
+    print(f"Saved negative-only crop grid to {negative_crop_output_path}")
 
 
 if __name__ == "__main__":

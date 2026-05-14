@@ -1,4 +1,5 @@
 import os
+import random
 from argparse import SUPPRESS, ArgumentParser
 from pathlib import Path
 
@@ -24,7 +25,11 @@ from model import (
     load_encoder_checkpoint,
     load_model_checkpoint,
 )
-from roi_guidance import build_roi_record_from_cam, load_roi_records_from_json
+from roi_guidance import (
+    build_roi_record_from_cam,
+    canonicalize_image_path,
+    load_roi_records_from_json,
+)
 from testdata import load_barrett_gradcam_dataset, load_external_testset, load_segmentation_testset
 
 
@@ -84,6 +89,20 @@ HEAD_TYPE_CHOICES = (
     "residual_bottleneck",
     "cosine_linear",
 )
+
+
+def seed_everything(seed):
+    seed = int(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
 
 
 def get_args_parser():
@@ -381,6 +400,34 @@ def get_args_parser():
     parser.add_argument("--lambda-ce", type=float, default=1.0, help=SUPPRESS)
     parser.add_argument("--lambda-supmin", type=float, default=1.0, help=SUPPRESS)
     parser.add_argument("--lambda-suppro", type=float, default=1.0, help=SUPPRESS)
+    parser.add_argument(
+        "--balanced-sampler",
+        action="store_true",
+        help=(
+            "Use exactly class-balanced mini-batches during training. "
+            "This is especially useful for SupPro pretraining."
+        ),
+    )
+    parser.add_argument(
+        "--suppro-roi",
+        action="store_true",
+        help=(
+            "During SupPro pretraining, add an auxiliary positive ROI contrastive loss "
+            "using trusted ROI crops loaded from --roi-records-path."
+        ),
+    )
+    parser.add_argument(
+        "--suppro-roi-weight",
+        type=float,
+        default=0.2,
+        help="Weight of the auxiliary ROI-aware SupPro loss during pretraining.",
+    )
+    parser.add_argument(
+        "--suppro-roi-warmup-epochs",
+        type=int,
+        default=0,
+        help="Number of full pretraining epochs to run before turning on the ROI-aware SupPro loss.",
+    )
 
     parser.set_defaults(gradcam_skip_empty_masks=True)
     return parser
@@ -455,7 +502,7 @@ def build_gradcam_roi_records(args, model, train_ds, device):
                 )
                 if roi_record is None:
                     continue
-                roi_records[str(image_path)] = roi_record
+                roi_records[canonicalize_image_path(image_path)] = roi_record
     finally:
         if was_training:
             model.train()
@@ -468,7 +515,9 @@ def activate_saved_train_roi_guidance(args, train_ds):
         return None
 
     roi_records, metadata = load_roi_records_from_json(args.roi_records_path)
-    train_image_paths = set(train_ds.df["img"].astype(str).tolist())
+    train_image_paths = set(
+        train_ds.df["img"].astype(str).map(canonicalize_image_path).tolist()
+    )
     matched_records = {
         image_path: record for image_path, record in roi_records.items() if image_path in train_image_paths
     }
@@ -606,6 +655,25 @@ def resolve_runtime_config(args):
         raise ValueError(
             f"--roi-gradcam-min-prob must be in [0, 1], got {args.roi_gradcam_min_prob}."
         )
+    if args.balanced_sampler and args.batch_size % 2 != 0:
+        raise ValueError(
+            f"--balanced-sampler requires an even --batch-size, got {args.batch_size}."
+        )
+    if args.suppro_roi and args.stage != "pretrain":
+        raise ValueError("--suppro-roi is only supported for --stage pretrain.")
+    if args.suppro_roi and args.loss_name != "suppro":
+        raise ValueError("--suppro-roi requires --loss-name suppro.")
+    if args.suppro_roi and not args.roi_records_path:
+        raise ValueError("--suppro-roi requires --roi-records-path.")
+    if args.suppro_roi_weight < 0.0:
+        raise ValueError(
+            f"--suppro-roi-weight must be >= 0, got {args.suppro_roi_weight}."
+        )
+    if args.suppro_roi_warmup_epochs < 0:
+        raise ValueError(
+            "--suppro-roi-warmup-epochs must be >= 0, "
+            f"got {args.suppro_roi_warmup_epochs}."
+        )
 
     if args.head_hidden_dim is not None and args.head_hidden_dim <= 0:
         raise ValueError(f"--head-hidden-dim must be > 0, got {args.head_hidden_dim}.")
@@ -675,6 +743,38 @@ def suppro_loss(features, labels, temperature, base_temperature, class_weights=N
         repeated_labels = labels.view(-1).repeat(views)
         loss = loss * class_weights[repeated_labels]
 
+    return loss.mean()
+
+
+def suppro_roi_loss(
+    global_features,
+    roi_features,
+    global_labels,
+    roi_labels,
+    temperature,
+    base_temperature,
+):
+    if roi_features is None or roi_features.numel() == 0:
+        return torch.tensor(0.0, device=global_features.device)
+
+    global_features = F.normalize(global_features, dim=-1)
+    roi_features = F.normalize(roi_features, dim=-1)
+    device = global_features.device
+    _, views, _ = global_features.shape
+
+    anchor_feature = roi_features
+    anchor_labels = roi_labels.view(-1, 1)
+    contrast_feature = torch.cat(torch.unbind(global_features, dim=1), dim=0)
+    contrast_labels = global_labels.view(-1).repeat(views).view(1, -1)
+    mask = torch.eq(anchor_labels, contrast_labels).float().to(device)
+
+    logits = torch.matmul(anchor_feature, contrast_feature.T) / temperature
+    logits = logits - logits.max(dim=1, keepdim=True).values.detach()
+
+    exp_logits = torch.exp(logits)
+    log_prob = logits - torch.log(exp_logits.sum(dim=1, keepdim=True) + 1e-12)
+    mean_log_prob_pos = (mask * log_prob).sum(dim=1) / (mask.sum(dim=1) + 1e-12)
+    loss = -(temperature / base_temperature) * mean_log_prob_pos
     return loss.mean()
 
 
@@ -875,8 +975,7 @@ def main(args):
     )
 
     os.makedirs(args.save_dir, exist_ok=True)
-    torch.manual_seed(args.seed)
-    torch.backends.cudnn.deterministic = True
+    seed_everything(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print(
@@ -900,6 +999,14 @@ def main(args):
             f"activation after {args.roi_start_epoch} epochs | "
             f"gradcam threshold={args.roi_gradcam_threshold} | "
             f"min positive prob={args.roi_gradcam_min_prob}"
+        )
+    if args.suppro_roi:
+        print(
+            "ROI-aware SupPro configured | "
+            f"roi path={args.roi_records_path} | "
+            f"weight={args.suppro_roi_weight} | "
+            f"warmup epochs={args.suppro_roi_warmup_epochs} | "
+            f"balanced_sampler={bool(args.balanced_sampler)}"
         )
     if args.stage == "pretrain":
         print(
@@ -1001,13 +1108,26 @@ def main(args):
         train_ce = 0.0
         train_supmin = 0.0
         train_suppro = 0.0
+        train_suppro_roi = 0.0
+        train_suppro_roi_samples = 0
         train_correct = 0
         train_total = 0
 
-        for images1, images2, labels in train_loader:
-            images1 = images1.to(device)
-            images2 = images2.to(device)
-            labels = labels.to(device).long()
+        for batch in train_loader:
+            if args.stage == "pretrain" and args.suppro_roi:
+                images1, images2, roi_images, labels, has_roi = batch
+                images1 = images1.to(device)
+                images2 = images2.to(device)
+                roi_images = roi_images.to(device)
+                labels = labels.to(device).long()
+                has_roi = has_roi.to(device).bool()
+            else:
+                images1, images2, labels = batch
+                images1 = images1.to(device)
+                images2 = images2.to(device)
+                labels = labels.to(device).long()
+                roi_images = None
+                has_roi = None
 
             optimizer.zero_grad()
 
@@ -1031,11 +1151,25 @@ def main(args):
                         base_temperature=args.base_temperature,
                         class_weights=class_weights,
                     )
+                    roi_loss_active = args.suppro_roi and epoch >= args.suppro_roi_warmup_epochs
+                    if roi_loss_active and has_roi is not None and torch.any(has_roi):
+                        roi_out = model(roi_images[has_roi], return_embedding=True)
+                        loss_suppro_roi = suppro_roi_loss(
+                            emb_pair,
+                            roi_out["embedding"],
+                            labels,
+                            labels[has_roi],
+                            temperature=args.temperature,
+                            base_temperature=args.base_temperature,
+                        )
+                    else:
+                        loss_suppro_roi = torch.tensor(0.0, device=device)
                     loss_supmin = torch.tensor(0.0, device=device)
-                    loss = loss_suppro
+                    loss = loss_suppro + float(args.suppro_roi_weight) * loss_suppro_roi
                 else:
                     loss_supmin = 0.5 * (supmin_loss(emb1, labels) + supmin_loss(emb2, labels))
                     loss_suppro = torch.tensor(0.0, device=device)
+                    loss_suppro_roi = torch.tensor(0.0, device=device)
                     loss = loss_supmin
 
                 preds = torch.zeros_like(labels)
@@ -1045,6 +1179,7 @@ def main(args):
                 loss_ce = 0.5 * (criterion(logits1, labels) + criterion(logits2, labels))
                 loss_supmin = torch.tensor(0.0, device=device)
                 loss_suppro = torch.tensor(0.0, device=device)
+                loss_suppro_roi = torch.tensor(0.0, device=device)
                 loss = loss_ce
                 preds = torch.argmax(logits1, dim=1)
 
@@ -1056,6 +1191,9 @@ def main(args):
             train_ce += loss_ce.item() * batch_size
             train_supmin += loss_supmin.item() * batch_size
             train_suppro += loss_suppro.item() * batch_size
+            train_suppro_roi += loss_suppro_roi.item() * batch_size
+            if has_roi is not None:
+                train_suppro_roi_samples += int(has_roi.sum().item())
             if args.stage != "pretrain":
                 train_correct += (preds == labels).sum().item()
             train_total += batch_size
@@ -1067,6 +1205,7 @@ def main(args):
         avg_train_ce = train_ce / max(1, train_total)
         avg_train_supmin = train_supmin / max(1, train_total)
         avg_train_suppro = train_suppro / max(1, train_total)
+        avg_train_suppro_roi = train_suppro_roi / max(1, train_total)
         train_accuracy = (
             train_correct / max(1, train_total) if args.stage != "pretrain" else float("nan")
         )
@@ -1075,7 +1214,9 @@ def main(args):
             print(
                 f"Epoch {epoch + 1:02d}/{args.epochs} | "
                 f"Pretrain Loss: {avg_train_loss:.4f} | "
-                f"SupPro: {avg_train_suppro:.4f} | SupMin: {avg_train_supmin:.4f}"
+                f"SupPro: {avg_train_suppro:.4f} | "
+                f"SupPro ROI: {avg_train_suppro_roi:.4f} | "
+                f"SupMin: {avg_train_supmin:.4f}"
             )
             wandb.log(
                 {
@@ -1086,6 +1227,8 @@ def main(args):
                     "pretrain/loss_ce": avg_train_ce,
                     "pretrain/loss_supmin": avg_train_supmin,
                     "pretrain/loss_suppro": avg_train_suppro,
+                    "pretrain/loss_suppro_roi": avg_train_suppro_roi,
+                    "pretrain/roi_samples_in_epoch": train_suppro_roi_samples,
                 },
                 step=epoch + 1,
             )

@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +20,10 @@ MASK_SUFFIXES = (
     "-annotation",
     "-label",
 )
+
+
+def canonicalize_image_path(image_path):
+    return os.path.normpath(str(image_path).replace("\\", "/"))
 
 
 def list_image_files(root_dir, recursive=True):
@@ -234,7 +239,7 @@ def load_roi_records_from_masks(image_paths, masks_dir):
                 break
 
         if matched_mask_path is None:
-            unmatched_images.append(str(image_path))
+            unmatched_images.append(canonicalize_image_path(image_path))
             continue
 
         mask = Image.open(matched_mask_path).convert("L")
@@ -242,9 +247,10 @@ def load_roi_records_from_masks(image_paths, masks_dir):
         if roi_record is None:
             continue
 
-        roi_record["mask_path"] = str(matched_mask_path)
-        roi_records[str(image_path)] = roi_record
-        matched_images.append(str(image_path))
+        roi_record["mask_path"] = canonicalize_image_path(matched_mask_path)
+        canonical_image_path = canonicalize_image_path(image_path)
+        roi_records[canonical_image_path] = roi_record
+        matched_images.append(canonical_image_path)
 
     return roi_records, matched_images, unmatched_images
 
@@ -347,7 +353,9 @@ def save_roi_records_to_json(path, roi_records, metadata=None):
     serialized_records = {}
     for image_path, record in roi_records.items():
         normalized_record = _normalize_roi_record(record)
-        serialized_records[str(image_path)] = _serialize_json_safe(normalized_record)
+        serialized_records[canonicalize_image_path(image_path)] = _serialize_json_safe(
+            normalized_record
+        )
 
     payload = {
         "metadata": dict(metadata or {}),
@@ -370,7 +378,7 @@ def load_roi_records_from_json(path):
         metadata = {}
 
     roi_records = {
-        str(image_path): _normalize_roi_record(record)
+        canonicalize_image_path(image_path): _normalize_roi_record(record)
         for image_path, record in dict(raw_records).items()
     }
     return roi_records, dict(metadata)

@@ -1,10 +1,13 @@
+import math
 import os
+import random
 
+import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
 from sklearn.model_selection import StratifiedKFold, train_test_split
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import BatchSampler, DataLoader, Dataset
 from torchvision.datasets import ImageFolder
 from torchvision.transforms.v2 import (
     ColorJitter,
@@ -19,9 +22,21 @@ from torchvision.transforms.v2 import (
     ToImage,
 )
 
-from roi_guidance import crop_image_to_roi
+from roi_guidance import canonicalize_image_path, crop_image_to_roi
 
 DEFAULT_DATA_DIR = "../data/Challenge_train_data"
+
+
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % (2**32)
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
+def build_seeded_generator(seed):
+    generator = torch.Generator()
+    generator.manual_seed(int(seed))
+    return generator
 
 
 class TwoViewDataset(Dataset):
@@ -55,7 +70,9 @@ class TwoViewDataset(Dataset):
         return len(self.df)
 
     def set_roi_records(self, roi_records, active=True):
-        self.roi_records = {str(key): value for key, value in roi_records.items()}
+        self.roi_records = {
+            canonicalize_image_path(key): value for key, value in roi_records.items()
+        }
         self.roi_guidance_active = bool(active) and len(self.roi_records) > 0
 
     def clear_roi_records(self):
@@ -65,7 +82,7 @@ class TwoViewDataset(Dataset):
     def get_roi_guidance_stats(self):
         positive_image_paths = self.df.loc[
             self.df["label"] == self.roi_target_label, "img"
-        ].astype(str).tolist()
+        ].astype(str).map(canonicalize_image_path).tolist()
         covered_records = [
             self.roi_records[path] for path in positive_image_paths if path in self.roi_records
         ]
@@ -97,7 +114,7 @@ class TwoViewDataset(Dataset):
         transform2 = self.transform2
         image2 = image
 
-        roi_record = self.roi_records.get(str(img_path))
+        roi_record = self.roi_records.get(canonicalize_image_path(img_path))
         use_roi = (
             self.roi_guidance_active
             and label == self.roi_target_label
@@ -120,6 +137,171 @@ class TwoViewDataset(Dataset):
             transform2 = self.roi_transform2
 
         return view1, transform2(image2), label
+
+
+class SupproROIDataset(Dataset):
+    def __init__(
+        self,
+        df,
+        global_transform1,
+        global_transform2,
+        roi_transform,
+        roi_target_label=1,
+        roi_context_scale=2.0,
+        roi_min_crop_scale=0.4,
+        roi_center_jitter=0.05,
+        roi_max_aspect_ratio=1.5,
+    ):
+        self.df = df.reset_index(drop=True)
+        self.global_transform1 = global_transform1
+        self.global_transform2 = global_transform2
+        self.roi_transform = roi_transform
+        self.roi_target_label = int(roi_target_label)
+        self.roi_context_scale = max(float(roi_context_scale), 1e-6)
+        self.roi_min_crop_scale = min(max(float(roi_min_crop_scale), 1e-6), 1.0)
+        self.roi_center_jitter = max(float(roi_center_jitter), 0.0)
+        self.roi_max_aspect_ratio = max(float(roi_max_aspect_ratio), 1.0)
+        self.roi_records = {}
+        self.roi_guidance_active = False
+
+    def __len__(self):
+        return len(self.df)
+
+    def set_roi_records(self, roi_records, active=True):
+        self.roi_records = {
+            canonicalize_image_path(key): value for key, value in roi_records.items()
+        }
+        self.roi_guidance_active = bool(active) and len(self.roi_records) > 0
+
+    def clear_roi_records(self):
+        self.roi_records = {}
+        self.roi_guidance_active = False
+
+    def get_roi_guidance_stats(self):
+        positive_image_paths = self.df.loc[
+            self.df["label"] == self.roi_target_label, "img"
+        ].astype(str).map(canonicalize_image_path).tolist()
+        covered_records = [
+            self.roi_records[path] for path in positive_image_paths if path in self.roi_records
+        ]
+        source_counts = {}
+        for record in covered_records:
+            source = str(record.get("source", "unknown"))
+            source_counts[source] = source_counts.get(source, 0) + 1
+
+        mean_coverage = 0.0
+        if covered_records:
+            mean_coverage = float(
+                sum(float(record.get("coverage", 0.0)) for record in covered_records)
+                / len(covered_records)
+            )
+
+        return {
+            "roi_guidance_active": bool(self.roi_guidance_active),
+            "roi_positive_images": len(covered_records),
+            "roi_positive_candidates": len(positive_image_paths),
+            "roi_source_counts": source_counts,
+            "roi_mean_coverage": mean_coverage,
+        }
+
+    def _select_roi_record(self, roi_record):
+        roi_islands = roi_record.get("roi_islands")
+        if not roi_islands:
+            return roi_record
+
+        island_index = int(torch.randint(len(roi_islands), (1,)).item())
+        return roi_islands[island_index]
+
+    def __getitem__(self, idx):
+        img_path = self.df.loc[idx, "img"]
+        image = Image.open(img_path).convert("RGB")
+        label = int(self.df.loc[idx, "label"])
+
+        global_view1 = self.global_transform1(image)
+        global_view2 = self.global_transform2(image)
+        roi_view = global_view1.clone()
+        has_roi = False
+
+        roi_record = self.roi_records.get(canonicalize_image_path(img_path))
+        if (
+            self.roi_guidance_active
+            and label == self.roi_target_label
+            and roi_record is not None
+        ):
+            selected_roi_record = self._select_roi_record(roi_record)
+            jitter_xy = (
+                (2.0 * float(torch.rand(1).item()) - 1.0) * self.roi_center_jitter,
+                (2.0 * float(torch.rand(1).item()) - 1.0) * self.roi_center_jitter,
+            )
+            roi_image = crop_image_to_roi(
+                image=image,
+                roi_record=selected_roi_record,
+                context_scale=self.roi_context_scale,
+                min_crop_scale=self.roi_min_crop_scale,
+                jitter_xy=jitter_xy,
+                max_aspect_ratio=self.roi_max_aspect_ratio,
+            )
+            roi_view = self.roi_transform(roi_image)
+            has_roi = True
+
+        return global_view1, global_view2, roi_view, label, bool(has_roi)
+
+
+class BalancedBatchSampler(BatchSampler):
+    def __init__(self, labels, batch_size, drop_last=False, generator=None):
+        if batch_size <= 0:
+            raise ValueError(f"batch_size must be > 0, got {batch_size}.")
+        if batch_size % 2 != 0:
+            raise ValueError(
+                f"BalancedBatchSampler requires an even batch size, got {batch_size}."
+            )
+
+        self.batch_size = int(batch_size)
+        self.drop_last = bool(drop_last)
+        self.half_batch_size = self.batch_size // 2
+        self.generator = generator
+        self.positive_indices = [
+            index for index, label in enumerate(labels) if int(label) == 1
+        ]
+        self.negative_indices = [
+            index for index, label in enumerate(labels) if int(label) == 0
+        ]
+
+        if not self.positive_indices or not self.negative_indices:
+            raise ValueError(
+                "BalancedBatchSampler requires at least one positive and one negative sample."
+            )
+
+        if self.drop_last:
+            self.num_batches = len(labels) // self.batch_size
+        else:
+            self.num_batches = int(math.ceil(len(labels) / float(self.batch_size)))
+
+    def __iter__(self):
+        positive_indices = torch.tensor(self.positive_indices, dtype=torch.long)
+        negative_indices = torch.tensor(self.negative_indices, dtype=torch.long)
+
+        for _ in range(self.num_batches):
+            pos_choice = positive_indices[
+                torch.randint(
+                    len(positive_indices),
+                    (self.half_batch_size,),
+                    generator=self.generator,
+                )
+            ]
+            neg_choice = negative_indices[
+                torch.randint(
+                    len(negative_indices),
+                    (self.half_batch_size,),
+                    generator=self.generator,
+                )
+            ]
+            batch = torch.cat([pos_choice, neg_choice], dim=0)
+            permutation = torch.randperm(batch.numel(), generator=self.generator)
+            yield batch[permutation].tolist()
+
+    def __len__(self):
+        return self.num_batches
 
 
 class SimpleDataset(Dataset):
@@ -159,12 +341,25 @@ def build_roi_focus_transform(input_size):
     ])
 
 
+def build_suppro_roi_train_transform(input_size):
+    return Compose([
+        ToImage(),
+        Resize((input_size, input_size)),
+        RandomHorizontalFlip(p=0.5),
+        RandomVerticalFlip(p=0.2),
+        RandomRotation(degrees=5),
+        ColorJitter(brightness=0.03, contrast=0.03, saturation=0.03, hue=0.005),
+        ToDtype(torch.float32, scale=True),
+        Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+
+
 def build_dataset_dataframe(data_dir):
-    centers = [
+    centers = sorted([
         folder
         for folder in os.listdir(data_dir)
         if folder.startswith("center") and os.path.isdir(os.path.join(data_dir, folder))
-    ]
+    ])
     if not centers:
         raise ValueError(f"No center folders found in {data_dir}.")
 
@@ -181,14 +376,19 @@ def build_dataset_dataframe(data_dir):
             raise ValueError(f"Class mapping mismatch in {center}: {ds.class_to_idx}")
 
         if class_names is None:
-            class_names = list(ds.class_to_idx.keys())
+            class_names = sorted(ds.class_to_idx.keys(), key=lambda name: ds.class_to_idx[name])
 
-        for img_path, label in ds.samples:
+        for img_path, label in sorted(
+            ds.samples,
+            key=lambda item: (int(item[1]), canonicalize_image_path(item[0])),
+        ):
             all_images.append(img_path)
             all_labels.append(label)
             all_centers.append(center)
 
     df = pd.DataFrame({"img": all_images, "label": all_labels, "center": all_centers})
+    df["img"] = df["img"].map(canonicalize_image_path)
+    df = df.sort_values(["center", "label", "img"], kind="stable").reset_index(drop=True)
     return df, class_names
 
 
@@ -207,6 +407,8 @@ def build_train_val_dataframes(data_dir, test_size=0.2, random_state=42):
     )
     train_df = train_df.drop(columns=["stratify_col"]).reset_index(drop=True)
     val_df = val_df.drop(columns=["stratify_col"]).reset_index(drop=True)
+    train_df = train_df.sort_values(["center", "label", "img"], kind="stable").reset_index(drop=True)
+    val_df = val_df.sort_values(["center", "label", "img"], kind="stable").reset_index(drop=True)
     return train_df, val_df, class_names
 
 
@@ -215,6 +417,9 @@ def prepare_datasets(args, device):
     data_dir = DEFAULT_DATA_DIR
     num_folds = int(getattr(args, "num_folds", 1))
     fold_index = int(getattr(args, "fold_index", 0))
+    seed = int(getattr(args, "seed", 42))
+    train_generator = build_seeded_generator(seed)
+    valid_generator = build_seeded_generator(seed + 1)
     print(f"Using input size: {input_size}x{input_size}")
 
     train_transform_1 = Compose([
@@ -238,6 +443,9 @@ def prepare_datasets(args, device):
         Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
     train_roi_transform_2 = build_roi_focus_transform(input_size)
+    suppro_roi_transform_1 = build_suppro_roi_train_transform(input_size)
+    suppro_roi_transform_2 = build_suppro_roi_train_transform(input_size)
+    suppro_roi_transform_local = build_suppro_roi_train_transform(input_size)
     valid_transform = build_eval_transform(input_size)
 
     df, class_names = build_dataset_dataframe(data_dir)
@@ -248,7 +456,7 @@ def prepare_datasets(args, device):
             df,
             test_size=0.2,
             stratify=df["stratify_col"],
-            random_state=42,
+            random_state=seed,
         )
         print("Using single validation split (80/20 stratified).")
     else:
@@ -270,32 +478,68 @@ def prepare_datasets(args, device):
             f"fold {fold_index + 1}/{num_folds} as validation."
         )
 
+    train_df = train_df.sort_values(["center", "label", "img"], kind="stable").reset_index(drop=True)
     val_df = val_df.reset_index(drop=True)
+    val_df = val_df.sort_values(["center", "label", "img"], kind="stable").reset_index(drop=True)
 
-    train_ds = TwoViewDataset(
-        train_df,
-        train_transform_1,
-        train_transform_2,
-        roi_transform2=train_roi_transform_2,
-        roi_target_label=getattr(args, "gradcam_target_class", 1),
-        roi_focus_prob=getattr(args, "roi_focus_prob", 1.0),
-        roi_context_scale=getattr(args, "roi_context_scale", 2.0),
-        roi_min_crop_scale=getattr(args, "roi_min_crop_scale", 0.4),
-        roi_center_jitter=getattr(args, "roi_center_jitter", 0.05),
-        roi_max_aspect_ratio=getattr(args, "roi_max_aspect_ratio", 1.5),
+    use_suppro_roi_dataset = (
+        args.stage == "pretrain" and bool(getattr(args, "suppro_roi", False))
     )
+
+    if use_suppro_roi_dataset:
+        train_ds = SupproROIDataset(
+            train_df,
+            suppro_roi_transform_1,
+            suppro_roi_transform_2,
+            suppro_roi_transform_local,
+            roi_target_label=getattr(args, "gradcam_target_class", 1),
+            roi_context_scale=getattr(args, "roi_context_scale", 2.0),
+            roi_min_crop_scale=getattr(args, "roi_min_crop_scale", 0.4),
+            roi_center_jitter=getattr(args, "roi_center_jitter", 0.05),
+            roi_max_aspect_ratio=getattr(args, "roi_max_aspect_ratio", 1.5),
+        )
+    else:
+        train_ds = TwoViewDataset(
+            train_df,
+            train_transform_1,
+            train_transform_2,
+            roi_transform2=train_roi_transform_2,
+            roi_target_label=getattr(args, "gradcam_target_class", 1),
+            roi_focus_prob=getattr(args, "roi_focus_prob", 1.0),
+            roi_context_scale=getattr(args, "roi_context_scale", 2.0),
+            roi_min_crop_scale=getattr(args, "roi_min_crop_scale", 0.4),
+            roi_center_jitter=getattr(args, "roi_center_jitter", 0.05),
+            roi_max_aspect_ratio=getattr(args, "roi_max_aspect_ratio", 1.5),
+        )
     valid_ds = SimpleDataset(val_df, valid_transform)
 
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-    )
+    if getattr(args, "balanced_sampler", False):
+        train_loader = DataLoader(
+            train_ds,
+            batch_sampler=BalancedBatchSampler(
+                labels=train_df["label"].tolist(),
+                batch_size=args.batch_size,
+                generator=train_generator,
+            ),
+            num_workers=args.num_workers,
+            worker_init_fn=seed_worker,
+            generator=train_generator,
+        )
+    else:
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=args.num_workers,
+            worker_init_fn=seed_worker,
+            generator=train_generator,
+        )
     valid_loader = DataLoader(
         valid_ds,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
+        worker_init_fn=seed_worker,
+        generator=valid_generator,
     )
     return train_loader, valid_loader, train_ds, valid_ds, class_names
