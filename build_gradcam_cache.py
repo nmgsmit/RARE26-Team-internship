@@ -140,89 +140,43 @@ def compute_gradcam_catalog(df, model, input_size, target_class, batch_size, num
     return results_df, raw_cam_store
 
 
-def build_target_class_tag(target_classes):
-    normalized = sorted({int(target_class) for target_class in target_classes})
-    if normalized == [0, 1]:
-        return "both-classes"
-    if len(normalized) == 1:
-        return f"class{normalized[0]}"
-    joined = "-".join(str(target_class) for target_class in normalized)
-    return f"classes-{joined}"
-
-
-def resolve_default_cache_path(checkpoint_path, target_classes):
-    checkpoint_path = Path(checkpoint_path)
-    output_dir = checkpoint_path.parent / "roi_records"
-    class_tag = build_target_class_tag(target_classes)
-    return output_dir / f"{checkpoint_path.stem}.{class_tag}.gradcam_cache.npz"
-
-
-def save_raw_gradcam_cache(cache_path, image_paths, raw_cam_store_by_class, float_dtype=np.float16):
+def save_raw_gradcam_cache(cache_path, results_df, raw_cam_store, float_dtype=np.float16):
     cache_path = Path(cache_path)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
 
-    ordered_paths = [str(path) for path in image_paths]
-    payload = {
-        "image_paths": np.asarray(ordered_paths, dtype=object),
-        "target_classes": np.asarray(sorted(raw_cam_store_by_class.keys()), dtype=np.int64),
-    }
-    for target_class, raw_cam_store in sorted(raw_cam_store_by_class.items()):
-        raw_cam_tensor = np.stack(
-            [np.asarray(raw_cam_store[path], dtype=np.float32) for path in ordered_paths],
-            axis=0,
-        ).astype(float_dtype)
-        payload[f"raw_cams_class{int(target_class)}"] = raw_cam_tensor
+    ordered_paths = [str(path) for path in results_df["img"].tolist()]
+    raw_cam_tensor = np.stack(
+        [np.asarray(raw_cam_store[path], dtype=np.float32) for path in ordered_paths],
+        axis=0,
+    ).astype(float_dtype)
 
-    if len(raw_cam_store_by_class) == 1:
-        sole_target_class = next(iter(sorted(raw_cam_store_by_class.keys())))
-        payload["raw_cams"] = payload[f"raw_cams_class{int(sole_target_class)}"]
-
-    np.savez_compressed(cache_path, **payload)
+    np.savez_compressed(
+        cache_path,
+        image_paths=np.asarray(ordered_paths, dtype=object),
+        raw_cams=raw_cam_tensor,
+    )
     return cache_path.resolve()
 
 
-def save_cache_manifest(
-    json_path,
-    cache_path,
-    results_by_class,
-    checkpoint_path,
-    data_dir,
-    target_classes,
-    input_size,
-):
+def save_cache_manifest(json_path, cache_path, results_df, checkpoint_path, data_dir, target_class, input_size):
     json_path = Path(json_path)
     json_path.parent.mkdir(parents=True, exist_ok=True)
-
-    normalized_target_classes = sorted({int(target_class) for target_class in target_classes})
-    first_results_df = results_by_class[normalized_target_classes[0]]
-    if len(normalized_target_classes) == 1:
-        gradcam_results = first_results_df.to_dict(orient="records")
-        gradcam_results_by_class = None
-    else:
-        gradcam_results = []
-        gradcam_results_by_class = {
-            str(target_class): results_by_class[target_class].to_dict(orient="records")
-            for target_class in normalized_target_classes
-        }
 
     payload = {
         "metadata": {
             "checkpoint": str(Path(checkpoint_path).resolve()),
             "data_dir": str(Path(data_dir).resolve()),
             "split": "train+val",
-            "image_count_total": int(len(first_results_df)),
-            "target_class": int(normalized_target_classes[0]) if len(normalized_target_classes) == 1 else None,
-            "target_classes": normalized_target_classes,
+            "image_count_total": int(len(results_df)),
+            "target_class": int(target_class),
             "input_size": int(input_size),
             "gradcam_cache_path": str(Path(cache_path).resolve()),
             "raw_gradcam_saved": True,
             "cache_manifest_only": True,
         },
         "roi_records": {},
-        "gradcam_results": gradcam_results,
+        "gradcam_results": results_df.to_dict(orient="records"),
     }
-    if gradcam_results_by_class is not None:
-        payload["gradcam_results_by_class"] = gradcam_results_by_class
 
     with json_path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=True)
@@ -241,12 +195,8 @@ def parse_args():
     parser.add_argument(
         "--output-cache-path",
         type=str,
-        default=None,
-        help=(
-            "Optional destination .npz path. If omitted, the script writes "
-            "./checkpoints/roi_records/<checkpoint-stem>.<class-tag>.gradcam_cache.npz "
-            "next to the checkpoint."
-        ),
+        required=True,
+        help="Destination .npz path, for example ./checkpoints/roi_records/rois.gradcam_cache.npz",
     )
     parser.add_argument(
         "--output-json-path",
@@ -257,13 +207,7 @@ def parse_args():
             "If provided, the notebook can reuse the cache immediately."
         ),
     )
-    parser.add_argument(
-        "--target-class",
-        type=int,
-        nargs="+",
-        default=[1],
-        help="One or more class indices used for Grad-CAM, for example --target-class 0 1.",
-    )
+    parser.add_argument("--target-class", type=int, default=1, help="Class index used for Grad-CAM.")
     parser.add_argument("--batch-size", type=int, default=8, help="Grad-CAM cache batch size.")
     parser.add_argument("--num-workers", type=int, default=4, help="DataLoader worker count.")
     parser.add_argument(
@@ -295,12 +239,7 @@ def parse_args():
 
 def main(args):
     checkpoint_path = Path(args.checkpoint).resolve()
-    normalized_target_classes = sorted({int(target_class) for target_class in args.target_class})
-    cache_path = (
-        Path(args.output_cache_path).resolve()
-        if args.output_cache_path
-        else resolve_default_cache_path(checkpoint_path, normalized_target_classes).resolve()
-    )
+    cache_path = Path(args.output_cache_path).resolve()
     json_path = Path(args.output_json_path).resolve() if args.output_json_path else None
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -323,27 +262,21 @@ def main(args):
     )
     print(f"Computing raw Grad-CAM cache for {len(all_df)} train+val images from {Path(args.data_dir).resolve()}")
 
-    results_by_class = {}
-    raw_cam_store_by_class = {}
-    for target_class in normalized_target_classes:
-        print(f"Computing Grad-CAMs for target class {target_class}")
-        results_df, raw_cam_store = compute_gradcam_catalog(
-            df=all_df,
-            model=model,
-            input_size=effective_input_size,
-            target_class=target_class,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            device=device,
-        )
-        results_by_class[target_class] = results_df
-        raw_cam_store_by_class[target_class] = raw_cam_store
+    results_df, raw_cam_store = compute_gradcam_catalog(
+        df=all_df,
+        model=model,
+        input_size=effective_input_size,
+        target_class=args.target_class,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        device=device,
+    )
 
     float_dtype = np.float16 if args.cache_dtype == "float16" else np.float32
     saved_cache_path = save_raw_gradcam_cache(
         cache_path=cache_path,
-        image_paths=all_df["img"].astype(str).tolist(),
-        raw_cam_store_by_class=raw_cam_store_by_class,
+        results_df=results_df,
+        raw_cam_store=raw_cam_store,
         float_dtype=float_dtype,
     )
     print(f"Saved raw Grad-CAM cache to {saved_cache_path}")
@@ -352,25 +285,18 @@ def main(args):
         saved_json_path = save_cache_manifest(
             json_path=json_path,
             cache_path=saved_cache_path,
-            results_by_class=results_by_class,
+            results_df=results_df,
             checkpoint_path=checkpoint_path,
             data_dir=args.data_dir,
-            target_classes=normalized_target_classes,
+            target_class=args.target_class,
             input_size=effective_input_size,
         )
         print(f"Saved notebook-compatible cache manifest to {saved_json_path}")
 
-    for target_class in normalized_target_classes:
-        print(f"Summary for target class {target_class}")
-        label_summary = (
-            results_by_class[target_class]
-            .groupby(["split", "label"])
-            .size()
-            .rename("count")
-            .reset_index()
-            .sort_values(["split", "label"])
-        )
-        print(label_summary.to_string(index=False))
+    label_summary = (
+        results_df.groupby(["split", "label"]).size().rename("count").reset_index().sort_values(["split", "label"])
+    )
+    print(label_summary.to_string(index=False))
 
 
 if __name__ == "__main__":
