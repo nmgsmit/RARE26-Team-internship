@@ -6,6 +6,8 @@ fi
 
 set -euo pipefail
 
+export CUBLAS_WORKSPACE_CONFIG=:4096:8
+
 # Fill this in first for new runs.
 # When set, this becomes the checkpoint base name for each stage-specific folder.
 EXPERIMENT_ID="${EXPERIMENT_ID:-name}"
