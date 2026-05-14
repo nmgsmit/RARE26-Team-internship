@@ -318,6 +318,15 @@ def get_args_parser():
         help="Random center jitter applied to ROI-focused crops as a fraction of crop width and height.",
     )
     parser.add_argument(
+        "--roi-max-aspect-ratio",
+        type=float,
+        default=1.5,
+        help=(
+            "Maximum aspect ratio allowed for ROI geometry before the shorter side is expanded. "
+            "Use this to avoid physiologically implausible, overly stretched ROI crops."
+        ),
+    )
+    parser.add_argument(
         "--roi-gradcam-threshold",
         type=float,
         default=0.6,
@@ -585,6 +594,10 @@ def resolve_runtime_config(args):
         )
     if args.roi_center_jitter < 0.0:
         raise ValueError(f"--roi-center-jitter must be >= 0, got {args.roi_center_jitter}.")
+    if args.roi_max_aspect_ratio < 1.0:
+        raise ValueError(
+            f"--roi-max-aspect-ratio must be >= 1.0, got {args.roi_max_aspect_ratio}."
+        )
     if not 0.0 <= args.roi_gradcam_threshold <= 1.0:
         raise ValueError(
             f"--roi-gradcam-threshold must be in [0, 1], got {args.roi_gradcam_threshold}."

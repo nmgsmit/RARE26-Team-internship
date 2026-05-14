@@ -36,6 +36,7 @@ class TwoViewDataset(Dataset):
         roi_context_scale=2.0,
         roi_min_crop_scale=0.4,
         roi_center_jitter=0.05,
+        roi_max_aspect_ratio=1.5,
     ):
         self.df = df.reset_index(drop=True)
         self.transform1 = transform1
@@ -46,6 +47,7 @@ class TwoViewDataset(Dataset):
         self.roi_context_scale = max(float(roi_context_scale), 1e-6)
         self.roi_min_crop_scale = min(max(float(roi_min_crop_scale), 1e-6), 1.0)
         self.roi_center_jitter = max(float(roi_center_jitter), 0.0)
+        self.roi_max_aspect_ratio = max(float(roi_max_aspect_ratio), 1.0)
         self.roi_records = {}
         self.roi_guidance_active = False
 
@@ -109,10 +111,11 @@ class TwoViewDataset(Dataset):
             )
             image2 = crop_image_to_roi(
                 image=image,
-                bbox=roi_record["bbox"],
+                roi_record=roi_record,
                 context_scale=self.roi_context_scale,
                 min_crop_scale=self.roi_min_crop_scale,
                 jitter_xy=jitter_xy,
+                max_aspect_ratio=self.roi_max_aspect_ratio,
             )
             transform2 = self.roi_transform2
 
@@ -279,6 +282,7 @@ def prepare_datasets(args, device):
         roi_context_scale=getattr(args, "roi_context_scale", 2.0),
         roi_min_crop_scale=getattr(args, "roi_min_crop_scale", 0.4),
         roi_center_jitter=getattr(args, "roi_center_jitter", 0.05),
+        roi_max_aspect_ratio=getattr(args, "roi_max_aspect_ratio", 1.5),
     )
     valid_ds = SimpleDataset(val_df, valid_transform)
 

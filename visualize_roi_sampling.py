@@ -1,15 +1,18 @@
 import argparse
-import json
-import random
 from pathlib import Path
 
 from PIL import Image, ImageColor, ImageDraw, ImageFont
 
-from roi_guidance import crop_image_to_roi
+from roi_guidance import (
+    DEFAULT_ROI_MAX_ASPECT_RATIO,
+    compute_crop_window_from_roi,
+    crop_image_to_roi,
+    load_roi_records_from_json,
+)
 
 
-DEFAULT_ROI_JSON = "../gastronet_pretrain_suppro_ROIpretrained_train_rois.json"
-DEFAULT_OUTPUT_DIR = "outputs/roi_sampling_preview"
+DEFAULT_ROI_JSON = "./checkpoints/roi_records/rois.json"
+DEFAULT_OUTPUT_DIR = "outputs/roi_sampling_preview_new"
 
 
 def parse_args():
@@ -34,7 +37,7 @@ def parse_args():
     parser.add_argument(
         "--grid-size",
         type=int,
-        default=5,
+        default=12,
         help="Number of rows and columns in the preview grid.",
     )
     parser.add_argument(
@@ -56,31 +59,46 @@ def parse_args():
         help="ROI sampler minimum normalized crop scale used for the crop preview.",
     )
     parser.add_argument(
-        "--selection-mode",
-        choices=("score", "path", "smallest_crop", "largest_crop"),
-        default="smallest_crop",
-        help="How to choose which ROI-positive images are shown.",
-    )
-    parser.add_argument(
-        "--random-seed",
-        type=int,
-        default=7,
-        help="Seed used for reproducible random crop placement.",
+        "--max-aspect-ratio",
+        type=float,
+        default=None,
+        help=(
+            "Maximum ROI aspect ratio used before the shorter side is expanded. "
+            "Defaults to the value stored in the ROI JSON metadata, or 1.5 if absent."
+        ),
     )
     return parser.parse_args()
 
 
 def load_roi_payload(roi_json_path):
-    with roi_json_path.open("r", encoding="utf-8") as handle:
-        payload = json.load(handle)
-
-    if isinstance(payload, dict) and "roi_records" in payload:
-        metadata = dict(payload.get("metadata", {}))
-        roi_records = dict(payload.get("roi_records", {}))
-    else:
-        metadata = {}
-        roi_records = dict(payload)
+    roi_records, metadata = load_roi_records_from_json(roi_json_path)
     return metadata, roi_records
+
+
+def flatten_roi_entries(roi_records):
+    flattened_entries = []
+    for image_path, record in roi_records.items():
+        roi_islands = list(record.get("roi_islands", []))
+        if roi_islands:
+            for island_record in roi_islands:
+                entry_record = dict(island_record)
+                entry_record.setdefault("source", record.get("source", "gradcam"))
+                entry_record["parent_image_path"] = str(image_path)
+                entry_record["parent_island_count"] = int(record.get("island_count", len(roi_islands)))
+                flattened_entries.append((str(image_path), entry_record))
+        else:
+            entry_record = dict(record)
+            entry_record["parent_image_path"] = str(image_path)
+            entry_record["parent_island_count"] = 1
+            flattened_entries.append((str(image_path), entry_record))
+    return flattened_entries
+
+
+def sanitize_path_arg(path_value):
+    sanitized = str(path_value)
+    for escaped_control_char in ("\r", "\n", "\t"):
+        sanitized = sanitized.replace(escaped_control_char, "\\")
+    return sanitized.strip().strip('"').strip("'")
 
 
 def resolve_image_path(image_path_str, roi_json_path):
@@ -108,63 +126,8 @@ def resolve_image_path(image_path_str, roi_json_path):
     )
 
 
-def compute_crop_window(bbox, context_scale, min_crop_scale, jitter_xy=(0.0, 0.0)):
-    x0, y0, x1, y1 = [float(value) for value in bbox]
-    x0 = min(max(x0, 0.0), 1.0)
-    y0 = min(max(y0, 0.0), 1.0)
-    x1 = min(max(x1, x0 + 1e-6), 1.0)
-    y1 = min(max(y1, y0 + 1e-6), 1.0)
-
-    roi_width = x1 - x0
-    roi_height = y1 - y0
-    crop_width = min(1.0, max(float(min_crop_scale), roi_width * float(context_scale)))
-    crop_height = min(1.0, max(float(min_crop_scale), roi_height * float(context_scale)))
-
-    center_x = 0.5 * (x0 + x1) + float(jitter_xy[0]) * 0.5 * crop_width
-    center_y = 0.5 * (y0 + y1) + float(jitter_xy[1]) * 0.5 * crop_height
-
-    left = min(max(center_x - 0.5 * crop_width, 0.0), 1.0 - crop_width)
-    top = min(max(center_y - 0.5 * crop_height, 0.0), 1.0 - crop_height)
-    right = left + crop_width
-    bottom = top + crop_height
-    return (left, top, right, bottom)
-
-
-def select_records(roi_records, max_images, selection_mode, context_scale, min_crop_scale):
-    items = list(roi_records.items())
-    if selection_mode == "score":
-        items.sort(
-            key=lambda item: (
-                -float(item[1].get("score", 0.0)),
-                str(item[0]),
-            )
-        )
-    elif selection_mode == "smallest_crop":
-        items.sort(
-            key=lambda item: (
-                (compute_crop_window(item[1]["bbox"], context_scale, min_crop_scale)[2]
-                 - compute_crop_window(item[1]["bbox"], context_scale, min_crop_scale)[0])
-                * (compute_crop_window(item[1]["bbox"], context_scale, min_crop_scale)[3]
-                   - compute_crop_window(item[1]["bbox"], context_scale, min_crop_scale)[1]),
-                float(item[1].get("coverage", 0.0)),
-                str(item[0]),
-            )
-        )
-    elif selection_mode == "largest_crop":
-        items.sort(
-            key=lambda item: (
-                -(
-                    (compute_crop_window(item[1]["bbox"], context_scale, min_crop_scale)[2]
-                     - compute_crop_window(item[1]["bbox"], context_scale, min_crop_scale)[0])
-                    * (compute_crop_window(item[1]["bbox"], context_scale, min_crop_scale)[3]
-                       - compute_crop_window(item[1]["bbox"], context_scale, min_crop_scale)[1])
-                ),
-                str(item[0]),
-            )
-        )
-    else:
-        items.sort(key=lambda item: str(item[0]))
-    return items[:max_images]
+def select_records(roi_entries, max_images):
+    return list(roi_entries)[:max_images]
 
 
 def get_font():
@@ -179,10 +142,11 @@ def draw_text_block(draw, xy, text, fill, font):
     draw.multiline_text(xy, text, fill=fill, font=font, spacing=2)
 
 
-def build_overlay_tile(image, bbox, crop_bbox, tile_size, caption):
+def build_overlay_tile(image, roi_record, crop_bbox, tile_size, caption):
     image = image.convert("RGB")
     width, height = image.size
-    x0, y0, x1, y1 = [float(value) for value in bbox]
+    source_bbox = roi_record.get("source_bbox", roi_record["bbox"])
+    x0, y0, x1, y1 = [float(value) for value in source_bbox]
     cx0, cy0, cx1, cy1 = [float(value) for value in crop_bbox]
 
     left = max(0, min(width - 1, int(round(x0 * width))))
@@ -218,13 +182,14 @@ def build_overlay_tile(image, bbox, crop_bbox, tile_size, caption):
     return canvas
 
 
-def build_crop_tile(image, bbox, tile_size, context_scale, min_crop_scale, caption):
+def build_crop_tile(image, roi_record, tile_size, context_scale, min_crop_scale, max_aspect_ratio, caption):
     crop = crop_image_to_roi(
         image=image,
-        bbox=bbox,
+        roi_record=roi_record,
         context_scale=context_scale,
         min_crop_scale=min_crop_scale,
         jitter_xy=(0.0, 0.0),
+        max_aspect_ratio=max_aspect_ratio,
     ).convert("RGB")
     tile = fit_square(crop, tile_size)
 
@@ -247,49 +212,10 @@ def crop_image_to_window(image, window_bbox):
     return image.crop((left_px, top_px, right_px, bottom_px))
 
 
-def sample_random_crop_window(crop_bbox, rng):
-    left, top, right, bottom = [float(value) for value in crop_bbox]
-    crop_width = right - left
-    crop_height = bottom - top
-
-    max_left = max(0.0, 1.0 - crop_width)
-    max_top = max(0.0, 1.0 - crop_height)
-    random_left = rng.uniform(0.0, max_left) if max_left > 0.0 else 0.0
-    random_top = rng.uniform(0.0, max_top) if max_top > 0.0 else 0.0
-    return (
-        random_left,
-        random_top,
-        random_left + crop_width,
-        random_top + crop_height,
-    )
-
-
-def build_random_crop_tile(image, random_crop_bbox, tile_size, caption):
-    crop = crop_image_to_window(image=image, window_bbox=random_crop_bbox).convert("RGB")
+def build_source_roi_crop_tile(image, roi_record, tile_size, caption):
+    source_bbox = roi_record.get("source_bbox", roi_record["bbox"])
+    crop = crop_image_to_window(image=image, window_bbox=source_bbox).convert("RGB")
     tile = fit_square(crop, tile_size)
-
-    caption_height = 34
-    canvas = Image.new("RGB", (tile_size, tile_size + caption_height), "white")
-    canvas.paste(tile, (0, 0))
-    draw = ImageDraw.Draw(canvas)
-    draw_text_block(draw, (8, tile_size + 6), caption, fill="black", font=get_font())
-    return canvas
-
-
-def build_masked_roi_tile(image, bbox, tile_size, caption):
-    image = image.convert("RGB")
-    width, height = image.size
-    x0, y0, x1, y1 = [float(value) for value in bbox]
-
-    left = max(0, min(width - 1, int(round(x0 * width))))
-    top = max(0, min(height - 1, int(round(y0 * height))))
-    right = max(left + 1, min(width, int(round(x1 * width))))
-    bottom = max(top + 1, min(height, int(round(y1 * height))))
-
-    masked = image.copy()
-    draw = ImageDraw.Draw(masked)
-    draw.rectangle([left, top, right, bottom], fill="black")
-    tile = fit_square(masked, tile_size)
 
     caption_height = 34
     canvas = Image.new("RGB", (tile_size, tile_size + caption_height), "white")
@@ -334,52 +260,55 @@ def build_caption(index, image_path, record):
     short_name = image_name[:14]
     score = float(record.get("score", 0.0))
     coverage = float(record.get("coverage", 0.0))
-    return f"{index:02d} {short_name}\ns={score:.3f} cov={coverage:.3f}"
+    island_index = int(record.get("island_index", 0)) + 1
+    island_total = int(record.get("parent_island_count", record.get("island_count", 1)))
+    return (
+        f"{index:02d} {short_name}\n"
+        f"isl={island_index}/{island_total} s={score:.3f} cov={coverage:.3f}"
+    )
 
 
 def main():
     args = parse_args()
-    roi_json_path = Path(args.roi_json).resolve()
-    output_dir = Path(args.output_dir).resolve()
+    roi_json_path = Path(sanitize_path_arg(args.roi_json)).resolve()
+    output_dir = Path(sanitize_path_arg(args.output_dir)).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     metadata, roi_records = load_roi_payload(roi_json_path)
-    max_images = args.grid_size * args.grid_size
-    selected_records = select_records(
-        roi_records=roi_records,
-        max_images=max_images,
-        selection_mode=args.selection_mode,
-        context_scale=args.context_scale,
-        min_crop_scale=args.min_crop_scale,
+    roi_entries = flatten_roi_entries(roi_records)
+    max_aspect_ratio = float(
+        args.max_aspect_ratio
+        if args.max_aspect_ratio is not None
+        else metadata.get("roi_sampling_max_aspect_ratio", DEFAULT_ROI_MAX_ASPECT_RATIO)
     )
+    max_images = args.grid_size * args.grid_size
+    selected_records = select_records(roi_entries=roi_entries, max_images=max_images)
 
     if len(selected_records) < max_images:
         print(
-            f"Only found {len(selected_records)} ROI records; the remaining grid slots will be blank."
+            f"Only found {len(selected_records)} ROI entries; the remaining grid slots will be blank."
         )
 
     overlay_tiles = []
     crop_tiles = []
-    random_crop_tiles = []
-    masked_roi_tiles = []
-    rng = random.Random(args.random_seed)
+    source_roi_crop_tiles = []
 
     for index, (image_path_str, record) in enumerate(selected_records, start=1):
         image_path = resolve_image_path(image_path_str, roi_json_path)
         image = Image.open(image_path).convert("RGB")
         caption = build_caption(index, image_path_str, record)
-        crop_bbox = compute_crop_window(
-            bbox=record["bbox"],
+        crop_bbox = compute_crop_window_from_roi(
+            roi_record=record,
             context_scale=args.context_scale,
             min_crop_scale=args.min_crop_scale,
             jitter_xy=(0.0, 0.0),
+            max_aspect_ratio=max_aspect_ratio,
         )
-        random_crop_bbox = sample_random_crop_window(crop_bbox=crop_bbox, rng=rng)
 
         overlay_tiles.append(
             build_overlay_tile(
                 image=image,
-                bbox=record["bbox"],
+                roi_record=record,
                 crop_bbox=crop_bbox,
                 tile_size=args.tile_size,
                 caption=caption,
@@ -388,25 +317,18 @@ def main():
         crop_tiles.append(
             build_crop_tile(
                 image=image,
-                bbox=record["bbox"],
+                roi_record=record,
                 tile_size=args.tile_size,
                 context_scale=args.context_scale,
                 min_crop_scale=args.min_crop_scale,
+                max_aspect_ratio=max_aspect_ratio,
                 caption=caption,
             )
         )
-        random_crop_tiles.append(
-            build_random_crop_tile(
+        source_roi_crop_tiles.append(
+            build_source_roi_crop_tile(
                 image=image,
-                random_crop_bbox=random_crop_bbox,
-                tile_size=args.tile_size,
-                caption=caption,
-            )
-        )
-        masked_roi_tiles.append(
-            build_masked_roi_tile(
-                image=image,
-                bbox=record["bbox"],
+                roi_record=record,
                 tile_size=args.tile_size,
                 caption=caption,
             )
@@ -414,37 +336,32 @@ def main():
 
     input_size = metadata.get("input_size", "unknown")
     overlay_title = (
-        f"Grad-CAM ROI (yellow) + sampler crop window (cyan) | "
-        f"selected={len(selected_records)} | mode={args.selection_mode} | input_size={input_size}"
+        f"Source ROI (yellow) + sampler crop window (cyan) | "
+        f"selected={len(selected_records)} islands | order=json-top-down | input_size={input_size}"
     )
     crop_title = (
         f"ROI sampler crops | context_scale={args.context_scale} | "
-        f"min_crop_scale={args.min_crop_scale} | jitter=0.0"
+        f"min_crop_scale={args.min_crop_scale} | max_aspect_ratio={max_aspect_ratio:.2f} | jitter=0.0"
     )
-    random_crop_title = (
-        f"Random crops with ROI-matched size | seed={args.random_seed} | "
-        f"context_scale={args.context_scale} | min_crop_scale={args.min_crop_scale}"
+    source_roi_crop_title = (
+        "Direct source-ROI crops | "
+        "order=json-top-down"
     )
-    masked_roi_title = "Original images with ROI masked out by black box"
 
     overlay_grid = assemble_grid(overlay_tiles, args.grid_size, overlay_title)
     crop_grid = assemble_grid(crop_tiles, args.grid_size, crop_title)
-    random_crop_grid = assemble_grid(random_crop_tiles, args.grid_size, random_crop_title)
-    masked_roi_grid = assemble_grid(masked_roi_tiles, args.grid_size, masked_roi_title)
+    source_roi_crop_grid = assemble_grid(source_roi_crop_tiles, args.grid_size, source_roi_crop_title)
 
     overlay_output_path = output_dir / "roi_gradcam_overlay_grid.png"
     crop_output_path = output_dir / "roi_sampler_crop_grid.png"
-    random_crop_output_path = output_dir / "random_sampler_crop_grid.png"
-    masked_roi_output_path = output_dir / "roi_masked_black_box_grid.png"
+    source_roi_crop_output_path = output_dir / "source_roi_crop_grid.png"
     overlay_grid.save(overlay_output_path)
     crop_grid.save(crop_output_path)
-    random_crop_grid.save(random_crop_output_path)
-    masked_roi_grid.save(masked_roi_output_path)
+    source_roi_crop_grid.save(source_roi_crop_output_path)
 
     print(f"Saved Grad-CAM overlay grid to {overlay_output_path}")
     print(f"Saved ROI sampler crop grid to {crop_output_path}")
-    print(f"Saved random crop grid to {random_crop_output_path}")
-    print(f"Saved ROI-masked black-box grid to {masked_roi_output_path}")
+    print(f"Saved source ROI crop grid to {source_roi_crop_output_path}")
 
 
 if __name__ == "__main__":
