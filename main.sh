@@ -36,15 +36,18 @@ ROI_HARDNESS_ALPHA_MAX="${ROI_HARDNESS_ALPHA_MAX:-1.0}"
 SUPPRO_ROI="${SUPPRO_ROI:-0}"
 SUPPRO_ROI_WEIGHT="${SUPPRO_ROI_WEIGHT:-0.2}"
 SUPPRO_ROI_WARMUP_EPOCHS="${SUPPRO_ROI_WARMUP_EPOCHS:-0}"
+HARD_NEG_ROI_RECORDS_PATH="${HARD_NEG_ROI_RECORDS_PATH:-}"
+HARD_NEG_ROI_WEIGHT="${HARD_NEG_ROI_WEIGHT:-0.2}"
+HARD_NEG_ROI_WARMUP_EPOCHS="${HARD_NEG_ROI_WARMUP_EPOCHS:-0}"
 
 # Training and optimization.
-TEMPERATURE="${TEMPERATURE:-0.07}"
-BASE_TEMPERATURE="${BASE_TEMPERATURE:-0.07}"
+TEMPERATURE="${TEMPERATURE:-0.1}"
+BASE_TEMPERATURE="${BASE_TEMPERATURE:-0.1}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 PRETRAIN_EPOCHS="${PRETRAIN_EPOCHS:-50}"
 FINETUNE_EPOCHS="${FINETUNE_EPOCHS:-30}"
 
-LR="${LR:-1e-4}"
+LR="${LR:-1e-5}"
 BASELINE_LR="${BASELINE_LR:-1e-4}"
 PRETRAIN_BACKBONE_LR="${PRETRAIN_BACKBONE_LR:-${LR}}"
 PRETRAIN_PROJ_LR="${PRETRAIN_PROJ_LR:-3e-4}"
@@ -206,6 +209,18 @@ append_suppro_roi_args() {
 
 }
 
+append_hard_neg_roi_args() {
+    local -n args_ref=$1
+    if [ -z "${HARD_NEG_ROI_RECORDS_PATH}" ]; then
+        return 0
+    fi
+    args_ref+=(
+        --hard-neg-roi-records-path "${HARD_NEG_ROI_RECORDS_PATH}"
+        --hard-neg-roi-weight "${HARD_NEG_ROI_WEIGHT}"
+        --hard-neg-roi-warmup-epochs "${HARD_NEG_ROI_WARMUP_EPOCHS}"
+    )
+}
+
 run_python_train() {
     local -a args=("$@")
     echo
@@ -311,6 +326,7 @@ for backbone in "${BACKBONES[@]}"; do
                     build_common_args "pretrain" "${backbone}" "${PRETRAIN_LOSS}" "${pretrain_experiment_id}" "${PRETRAIN_EPOCHS}" "${PRETRAIN_SAVE_DIR}" "${CV_NUM_FOLDS}" "${fold_index}"
                 )
                 append_suppro_roi_args pretrain_args
+                append_hard_neg_roi_args pretrain_args
                 run_python_train "${pretrain_args[@]}"
             elif [ "${run_pretrain_stage}" = "1" ] && [ -n "${PRETRAIN_CHECKPOINT}" ]; then
                 if [ ! -f "${PRETRAIN_CHECKPOINT}" ]; then
@@ -325,6 +341,7 @@ for backbone in "${BACKBONES[@]}"; do
                     build_common_args "pretrain" "${backbone}" "${PRETRAIN_LOSS}" "${pretrain_experiment_id}" "${PRETRAIN_EPOCHS}" "${PRETRAIN_SAVE_DIR}" "${CV_NUM_FOLDS}" "${fold_index}"
                 )
                 append_suppro_roi_args pretrain_args
+                append_hard_neg_roi_args pretrain_args
                 run_python_train "${pretrain_args[@]}"
             elif [ -n "${PRETRAIN_CHECKPOINT}" ]; then
                 if [ ! -f "${PRETRAIN_CHECKPOINT}" ]; then

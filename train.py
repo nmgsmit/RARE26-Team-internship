@@ -428,6 +428,32 @@ def get_args_parser():
         default=0,
         help="Number of full pretraining epochs to run before turning on the ROI-aware SupPro loss.",
     )
+    parser.add_argument(
+        "--hard-neg-roi-records-path",
+        type=str,
+        default=None,
+        help=(
+            "Optional path to a saved ROI metadata JSON whose entries index ndbe (label==0) "
+            "images that the previous finetune model false-fired on. During SupPro pretraining "
+            "these become additional hard-negative anchors in the SupCon objective so the "
+            "encoder learns 'lesion-like != lesion' near the decision boundary."
+        ),
+    )
+    parser.add_argument(
+        "--hard-neg-roi-weight",
+        type=float,
+        default=0.2,
+        help="Weight of the hard-negative ROI-aware SupPro loss during pretraining.",
+    )
+    parser.add_argument(
+        "--hard-neg-roi-warmup-epochs",
+        type=int,
+        default=0,
+        help=(
+            "Number of full pretraining epochs to run before turning on the hard-negative "
+            "ROI-aware SupPro loss."
+        ),
+    )
 
     parser.set_defaults(gradcam_skip_empty_masks=True)
     return parser
@@ -444,6 +470,13 @@ def canonicalize_loss_name(loss_name):
 def _flatten_roi_source_counts(source_counts):
     return {
         f"train/roi_source_count_{source}": int(count)
+        for source, count in sorted(source_counts.items())
+    }
+
+
+def _flatten_hard_neg_roi_source_counts(source_counts):
+    return {
+        f"train/hard_neg_roi_source_count_{source}": int(count)
         for source, count in sorted(source_counts.items())
     }
 
@@ -553,6 +586,7 @@ def activate_saved_train_roi_guidance(args, train_ds):
         "dataset_stats": dataset_stats,
         "metadata": metadata,
     }
+
 
 
 def refresh_train_roi_guidance(args, model, train_ds, device, epoch_index):
@@ -673,6 +707,23 @@ def resolve_runtime_config(args):
         raise ValueError(
             "--suppro-roi-warmup-epochs must be >= 0, "
             f"got {args.suppro_roi_warmup_epochs}."
+        )
+    if args.hard_neg_roi_records_path and args.stage != "pretrain":
+        raise ValueError(
+            "--hard-neg-roi-records-path is only supported for --stage pretrain."
+        )
+    if args.hard_neg_roi_records_path and args.loss_name != "suppro":
+        raise ValueError(
+            "--hard-neg-roi-records-path requires --loss-name suppro."
+        )
+    if args.hard_neg_roi_weight < 0.0:
+        raise ValueError(
+            f"--hard-neg-roi-weight must be >= 0, got {args.hard_neg_roi_weight}."
+        )
+    if args.hard_neg_roi_warmup_epochs < 0:
+        raise ValueError(
+            "--hard-neg-roi-warmup-epochs must be >= 0, "
+            f"got {args.hard_neg_roi_warmup_epochs}."
         )
 
     if args.head_hidden_dim is not None and args.head_hidden_dim <= 0:
@@ -1008,6 +1059,13 @@ def main(args):
             f"warmup epochs={args.suppro_roi_warmup_epochs} | "
             f"balanced_sampler={bool(args.balanced_sampler)}"
         )
+    if args.hard_neg_roi_records_path:
+        print(
+            "Hard-negative ROI mining configured | "
+            f"hard-neg path={args.hard_neg_roi_records_path} | "
+            f"weight={args.hard_neg_roi_weight} | "
+            f"warmup epochs={args.hard_neg_roi_warmup_epochs}"
+        )
     if args.stage == "pretrain":
         print(
             "Pretrain mode only learns the backbone and projection head. "
@@ -1108,26 +1166,15 @@ def main(args):
         train_ce = 0.0
         train_supmin = 0.0
         train_suppro = 0.0
-        train_suppro_roi = 0.0
-        train_suppro_roi_samples = 0
+        train_hard_neg_loss = 0.0
         train_correct = 0
         train_total = 0
 
         for batch in train_loader:
-            if args.stage == "pretrain" and args.suppro_roi:
-                images1, images2, roi_images, labels, has_roi = batch
-                images1 = images1.to(device)
-                images2 = images2.to(device)
-                roi_images = roi_images.to(device)
-                labels = labels.to(device).long()
-                has_roi = has_roi.to(device).bool()
-            else:
-                images1, images2, labels = batch
-                images1 = images1.to(device)
-                images2 = images2.to(device)
-                labels = labels.to(device).long()
-                roi_images = None
-                has_roi = None
+            images1, images2, labels = batch
+            images1 = images1.to(device)
+            images2 = images2.to(device)
+            labels = labels.to(device).long()
 
             optimizer.zero_grad()
 
@@ -1151,25 +1198,15 @@ def main(args):
                         base_temperature=args.base_temperature,
                         class_weights=class_weights,
                     )
-                    roi_loss_active = args.suppro_roi and epoch >= args.suppro_roi_warmup_epochs
-                    if roi_loss_active and has_roi is not None and torch.any(has_roi):
-                        roi_out = model(roi_images[has_roi], return_embedding=True)
-                        loss_suppro_roi = suppro_roi_loss(
-                            emb_pair,
-                            roi_out["embedding"],
-                            labels,
-                            labels[has_roi],
-                            temperature=args.temperature,
-                            base_temperature=args.base_temperature,
-                        )
-                    else:
-                        loss_suppro_roi = torch.tensor(0.0, device=device)
+                    loss_suppro_roi = torch.tensor(0.0, device=device)
+                    loss_hard_neg = torch.tensor(0.0, device=device)
                     loss_supmin = torch.tensor(0.0, device=device)
-                    loss = loss_suppro + float(args.suppro_roi_weight) * loss_suppro_roi
+                    loss = loss_suppro
                 else:
                     loss_supmin = 0.5 * (supmin_loss(emb1, labels) + supmin_loss(emb2, labels))
                     loss_suppro = torch.tensor(0.0, device=device)
                     loss_suppro_roi = torch.tensor(0.0, device=device)
+                    loss_hard_neg = torch.tensor(0.0, device=device)
                     loss = loss_supmin
 
                 preds = torch.zeros_like(labels)
@@ -1180,6 +1217,7 @@ def main(args):
                 loss_supmin = torch.tensor(0.0, device=device)
                 loss_suppro = torch.tensor(0.0, device=device)
                 loss_suppro_roi = torch.tensor(0.0, device=device)
+                loss_hard_neg = torch.tensor(0.0, device=device)
                 loss = loss_ce
                 preds = torch.argmax(logits1, dim=1)
 
@@ -1191,9 +1229,7 @@ def main(args):
             train_ce += loss_ce.item() * batch_size
             train_supmin += loss_supmin.item() * batch_size
             train_suppro += loss_suppro.item() * batch_size
-            train_suppro_roi += loss_suppro_roi.item() * batch_size
-            if has_roi is not None:
-                train_suppro_roi_samples += int(has_roi.sum().item())
+            train_hard_neg_loss += loss_hard_neg.item() * batch_size
             if args.stage != "pretrain":
                 train_correct += (preds == labels).sum().item()
             train_total += batch_size
@@ -1205,7 +1241,7 @@ def main(args):
         avg_train_ce = train_ce / max(1, train_total)
         avg_train_supmin = train_supmin / max(1, train_total)
         avg_train_suppro = train_suppro / max(1, train_total)
-        avg_train_suppro_roi = train_suppro_roi / max(1, train_total)
+        avg_train_hard_neg = train_hard_neg_loss / max(1, train_total)
         train_accuracy = (
             train_correct / max(1, train_total) if args.stage != "pretrain" else float("nan")
         )
@@ -1215,7 +1251,6 @@ def main(args):
                 f"Epoch {epoch + 1:02d}/{args.epochs} | "
                 f"Pretrain Loss: {avg_train_loss:.4f} | "
                 f"SupPro: {avg_train_suppro:.4f} | "
-                f"SupPro ROI: {avg_train_suppro_roi:.4f} | "
                 f"SupMin: {avg_train_supmin:.4f}"
             )
             wandb.log(
@@ -1227,8 +1262,7 @@ def main(args):
                     "pretrain/loss_ce": avg_train_ce,
                     "pretrain/loss_supmin": avg_train_supmin,
                     "pretrain/loss_suppro": avg_train_suppro,
-                    "pretrain/loss_suppro_roi": avg_train_suppro_roi,
-                    "pretrain/roi_samples_in_epoch": train_suppro_roi_samples,
+                    "pretrain/loss_hard_neg": avg_train_hard_neg,
                 },
                 step=epoch + 1,
             )

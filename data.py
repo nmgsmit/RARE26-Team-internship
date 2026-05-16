@@ -151,6 +151,8 @@ class SupproROIDataset(Dataset):
         roi_min_crop_scale=0.4,
         roi_center_jitter=0.05,
         roi_max_aspect_ratio=1.5,
+        hard_neg_transform=None,
+        hard_neg_target_label=0,
     ):
         self.df = df.reset_index(drop=True)
         self.global_transform1 = global_transform1
@@ -163,6 +165,13 @@ class SupproROIDataset(Dataset):
         self.roi_max_aspect_ratio = max(float(roi_max_aspect_ratio), 1.0)
         self.roi_records = {}
         self.roi_guidance_active = False
+        # Hard-negative mining: ROI crops on ndbe (label==0) images that the previous
+        # finetune model false-fired on. These act as extra near-decision-boundary
+        # anchors in the SupCon objective ("lesion-like != lesion").
+        self.hard_neg_transform = hard_neg_transform if hard_neg_transform is not None else roi_transform
+        self.hard_neg_target_label = int(hard_neg_target_label)
+        self.hard_neg_roi_records = {}
+        self.hard_neg_roi_guidance_active = False
 
     def __len__(self):
         return len(self.df)
@@ -176,6 +185,19 @@ class SupproROIDataset(Dataset):
     def clear_roi_records(self):
         self.roi_records = {}
         self.roi_guidance_active = False
+
+    def set_hard_neg_roi_records(self, roi_records, active=True):
+        """Register hard-negative ROI records (ndbe images flagged by the prior model)."""
+        self.hard_neg_roi_records = {
+            canonicalize_image_path(key): value for key, value in roi_records.items()
+        }
+        self.hard_neg_roi_guidance_active = (
+            bool(active) and len(self.hard_neg_roi_records) > 0
+        )
+
+    def clear_hard_neg_roi_records(self):
+        self.hard_neg_roi_records = {}
+        self.hard_neg_roi_guidance_active = False
 
     def get_roi_guidance_stats(self):
         positive_image_paths = self.df.loc[
@@ -204,6 +226,35 @@ class SupproROIDataset(Dataset):
             "roi_mean_coverage": mean_coverage,
         }
 
+    def get_hard_neg_roi_guidance_stats(self):
+        negative_image_paths = self.df.loc[
+            self.df["label"] == self.hard_neg_target_label, "img"
+        ].astype(str).map(canonicalize_image_path).tolist()
+        covered_records = [
+            self.hard_neg_roi_records[path]
+            for path in negative_image_paths
+            if path in self.hard_neg_roi_records
+        ]
+        source_counts = {}
+        for record in covered_records:
+            source = str(record.get("source", "unknown"))
+            source_counts[source] = source_counts.get(source, 0) + 1
+
+        mean_coverage = 0.0
+        if covered_records:
+            mean_coverage = float(
+                sum(float(record.get("coverage", 0.0)) for record in covered_records)
+                / len(covered_records)
+            )
+
+        return {
+            "hard_neg_roi_guidance_active": bool(self.hard_neg_roi_guidance_active),
+            "hard_neg_roi_negative_images": len(covered_records),
+            "hard_neg_roi_negative_candidates": len(negative_image_paths),
+            "hard_neg_roi_source_counts": source_counts,
+            "hard_neg_roi_mean_coverage": mean_coverage,
+        }
+
     def _select_roi_record(self, roi_record):
         roi_islands = roi_record.get("roi_islands")
         if not roi_islands:
@@ -221,8 +272,11 @@ class SupproROIDataset(Dataset):
         global_view2 = self.global_transform2(image)
         roi_view = global_view1.clone()
         has_roi = False
+        hard_neg_view = global_view1.clone()
+        has_hard_neg = False
 
-        roi_record = self.roi_records.get(canonicalize_image_path(img_path))
+        canonical_path = canonicalize_image_path(img_path)
+        roi_record = self.roi_records.get(canonical_path)
         if (
             self.roi_guidance_active
             and label == self.roi_target_label
@@ -244,7 +298,37 @@ class SupproROIDataset(Dataset):
             roi_view = self.roi_transform(roi_image)
             has_roi = True
 
-        return global_view1, global_view2, roi_view, label, bool(has_roi)
+        hard_neg_record = self.hard_neg_roi_records.get(canonical_path)
+        if (
+            self.hard_neg_roi_guidance_active
+            and label == self.hard_neg_target_label
+            and hard_neg_record is not None
+        ):
+            selected_hard_neg_record = self._select_roi_record(hard_neg_record)
+            jitter_xy = (
+                (2.0 * float(torch.rand(1).item()) - 1.0) * self.roi_center_jitter,
+                (2.0 * float(torch.rand(1).item()) - 1.0) * self.roi_center_jitter,
+            )
+            hard_neg_image = crop_image_to_roi(
+                image=image,
+                roi_record=selected_hard_neg_record,
+                context_scale=self.roi_context_scale,
+                min_crop_scale=self.roi_min_crop_scale,
+                jitter_xy=jitter_xy,
+                max_aspect_ratio=self.roi_max_aspect_ratio,
+            )
+            hard_neg_view = self.hard_neg_transform(hard_neg_image)
+            has_hard_neg = True
+
+        return (
+            global_view1,
+            global_view2,
+            roi_view,
+            hard_neg_view,
+            label,
+            bool(has_roi),
+            bool(has_hard_neg),
+        )
 
 
 class BalancedBatchSampler(BatchSampler):
@@ -422,30 +506,12 @@ def prepare_datasets(args, device):
     valid_generator = build_seeded_generator(seed + 1)
     print(f"Using input size: {input_size}x{input_size}")
 
-    train_transform_1 = Compose([
-        ToImage(),
-        RandomResizedCrop((input_size, input_size), scale=(0.6, 1.0)),
-        RandomHorizontalFlip(p=0.5),
-        RandomVerticalFlip(p=0.2),
-        RandomRotation(degrees=10),
-        ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.02),
-        ToDtype(torch.float32, scale=True),
-        Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
-    train_transform_2 = Compose([
-        ToImage(),
-        RandomResizedCrop((input_size, input_size), scale=(0.6, 1.0)),
-        RandomHorizontalFlip(p=0.5),
-        RandomVerticalFlip(p=0.2),
-        RandomRotation(degrees=10),
-        ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.02),
-        ToDtype(torch.float32, scale=True),
-        Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
+    # View 1: full-frame light augmentation (no random crop — preserve full context).
+    train_transform_1 = build_roi_focus_transform(input_size)
+    # View 2 fallback (ndbe, or neo without a record): same full-frame light aug.
+    train_transform_2 = build_roi_focus_transform(input_size)
+    # View 2 when an ROI record exists for a neo sample: crop to ROI then light aug.
     train_roi_transform_2 = build_roi_focus_transform(input_size)
-    suppro_roi_transform_1 = build_suppro_roi_train_transform(input_size)
-    suppro_roi_transform_2 = build_suppro_roi_train_transform(input_size)
-    suppro_roi_transform_local = build_suppro_roi_train_transform(input_size)
     valid_transform = build_eval_transform(input_size)
 
     df, class_names = build_dataset_dataframe(data_dir)
@@ -482,35 +548,18 @@ def prepare_datasets(args, device):
     val_df = val_df.reset_index(drop=True)
     val_df = val_df.sort_values(["center", "label", "img"], kind="stable").reset_index(drop=True)
 
-    use_suppro_roi_dataset = (
-        args.stage == "pretrain" and bool(getattr(args, "suppro_roi", False))
+    train_ds = TwoViewDataset(
+        train_df,
+        train_transform_1,
+        train_transform_2,
+        roi_transform2=train_roi_transform_2,
+        roi_target_label=getattr(args, "gradcam_target_class", 1),
+        roi_focus_prob=getattr(args, "roi_focus_prob", 1.0),
+        roi_context_scale=getattr(args, "roi_context_scale", 2.0),
+        roi_min_crop_scale=getattr(args, "roi_min_crop_scale", 0.4),
+        roi_center_jitter=getattr(args, "roi_center_jitter", 0.05),
+        roi_max_aspect_ratio=getattr(args, "roi_max_aspect_ratio", 1.5),
     )
-
-    if use_suppro_roi_dataset:
-        train_ds = SupproROIDataset(
-            train_df,
-            suppro_roi_transform_1,
-            suppro_roi_transform_2,
-            suppro_roi_transform_local,
-            roi_target_label=getattr(args, "gradcam_target_class", 1),
-            roi_context_scale=getattr(args, "roi_context_scale", 2.0),
-            roi_min_crop_scale=getattr(args, "roi_min_crop_scale", 0.4),
-            roi_center_jitter=getattr(args, "roi_center_jitter", 0.05),
-            roi_max_aspect_ratio=getattr(args, "roi_max_aspect_ratio", 1.5),
-        )
-    else:
-        train_ds = TwoViewDataset(
-            train_df,
-            train_transform_1,
-            train_transform_2,
-            roi_transform2=train_roi_transform_2,
-            roi_target_label=getattr(args, "gradcam_target_class", 1),
-            roi_focus_prob=getattr(args, "roi_focus_prob", 1.0),
-            roi_context_scale=getattr(args, "roi_context_scale", 2.0),
-            roi_min_crop_scale=getattr(args, "roi_min_crop_scale", 0.4),
-            roi_center_jitter=getattr(args, "roi_center_jitter", 0.05),
-            roi_max_aspect_ratio=getattr(args, "roi_max_aspect_ratio", 1.5),
-        )
     valid_ds = SimpleDataset(val_df, valid_transform)
 
     if getattr(args, "balanced_sampler", False):
