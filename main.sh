@@ -40,6 +40,12 @@ HARD_NEG_ROI_RECORDS_PATH="${HARD_NEG_ROI_RECORDS_PATH:-}"
 HARD_NEG_ROI_WEIGHT="${HARD_NEG_ROI_WEIGHT:-0.2}"
 HARD_NEG_ROI_WARMUP_EPOCHS="${HARD_NEG_ROI_WARMUP_EPOCHS:-0}"
 
+# ROI sampling parameters (configurable for ablations)
+ROI_CONTEXT_SCALE="${ROI_CONTEXT_SCALE:-2.0}"
+ROI_MIN_CROP_SCALE="${ROI_MIN_CROP_SCALE:-0.4}"
+ROI_CENTER_JITTER="${ROI_CENTER_JITTER:-0.05}"
+ROI_MAX_ASPECT_RATIO="${ROI_MAX_ASPECT_RATIO:-1.5}"
+
 # Training and optimization.
 TEMPERATURE="${TEMPERATURE:-0.1}"
 BASE_TEMPERATURE="${BASE_TEMPERATURE:-0.1}"
@@ -160,6 +166,14 @@ build_common_args() {
     if [ "${BALANCED_SAMPLER}" = "1" ] && [ "${stage}" = "pretrain" ]; then
         args+=(--balanced-sampler)
     fi
+
+    # ROI sampling parameters
+    args+=(
+        --roi-context-scale "${ROI_CONTEXT_SCALE}"
+        --roi-min-crop-scale "${ROI_MIN_CROP_SCALE}"
+        --roi-center-jitter "${ROI_CENTER_JITTER}"
+        --roi-max-aspect-ratio "${ROI_MAX_ASPECT_RATIO}"
+    )
 
     printf '%s\n' "${args[@]}"
 }

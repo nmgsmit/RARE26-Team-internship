@@ -70,6 +70,15 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--center-jitter",
+        type=float,
+        default=0.0,
+        help=(
+            "Random center offset as fraction of crop size (default 0.0 for deterministic preview). "
+            "Set to 0.05 to match training jitter (±5%% of crop)."
+        ),
+    )
+    parser.add_argument(
         "--data-dir",
         type=str,
         default=DEFAULT_DATA_DIR,
@@ -250,13 +259,17 @@ def build_overlay_tile(image, roi_record, crop_bbox, tile_size, caption):
     return canvas
 
 
-def build_crop_tile(image, roi_record, tile_size, context_scale, min_crop_scale, max_aspect_ratio, caption):
+def build_crop_tile(image, roi_record, tile_size, context_scale, min_crop_scale, max_aspect_ratio, center_jitter, caption):
+    # Apply optional center jitter (default 0.0 for deterministic preview)
+    jitter_x = (2.0 * np.random.rand() - 1.0) * center_jitter if center_jitter > 0 else 0.0
+    jitter_y = (2.0 * np.random.rand() - 1.0) * center_jitter if center_jitter > 0 else 0.0
+
     crop = crop_image_to_roi(
         image=image,
         roi_record=roi_record,
         context_scale=context_scale,
         min_crop_scale=min_crop_scale,
-        jitter_xy=(0.0, 0.0),
+        jitter_xy=(jitter_x, jitter_y),
         max_aspect_ratio=max_aspect_ratio,
     ).convert("RGB")
     tile = fit_square(crop, tile_size)
@@ -456,6 +469,7 @@ def main():
                 context_scale=args.context_scale,
                 min_crop_scale=args.min_crop_scale,
                 max_aspect_ratio=max_aspect_ratio,
+                center_jitter=args.center_jitter,
                 caption=caption,
             )
         )

@@ -69,6 +69,15 @@ class TwoViewDataset(Dataset):
     def __len__(self):
         return len(self.df)
 
+    def _select_roi_record(self, roi_record):
+        """Randomly select one island if multiple exist, otherwise use primary bbox."""
+        roi_islands = roi_record.get("roi_islands")
+        if not roi_islands:
+            return roi_record
+
+        island_index = int(torch.randint(len(roi_islands), (1,)).item())
+        return roi_islands[island_index]
+
     def set_roi_records(self, roi_records, active=True):
         self.roi_records = {
             canonicalize_image_path(key): value for key, value in roi_records.items()
@@ -122,13 +131,16 @@ class TwoViewDataset(Dataset):
             and float(torch.rand(1).item()) <= self.roi_focus_prob
         )
         if use_roi:
+            # Randomly select one island if multiple exist
+            selected_roi_record = self._select_roi_record(roi_record)
+
             jitter_xy = (
                 (2.0 * float(torch.rand(1).item()) - 1.0) * self.roi_center_jitter,
                 (2.0 * float(torch.rand(1).item()) - 1.0) * self.roi_center_jitter,
             )
             image2 = crop_image_to_roi(
                 image=image,
-                roi_record=roi_record,
+                roi_record=selected_roi_record,
                 context_scale=self.roi_context_scale,
                 min_crop_scale=self.roi_min_crop_scale,
                 jitter_xy=jitter_xy,

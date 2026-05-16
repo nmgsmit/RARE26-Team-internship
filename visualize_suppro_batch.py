@@ -4,7 +4,8 @@ Shows what a SupPro training batch actually looks like:
   - One figure per sampled batch
   - Rows = samples (interleaved neo / ndbe to reflect BalancedBatchSampler)
   - Columns: original image | view 1 (full-frame light aug) | view 2 (ROI crop or full-frame)
-  - ROI bbox overlaid on the original for neo samples that have a record
+  - ROI bbox overlaid on the original for neo samples that have a record (yellow solid box)
+  - Actual crop window overlaid on the original (cyan dashed box) — shows context expansion
   - Similarity matrix of all (view1, view2) embeddings in the batch — shows
     which pairs the SupPro loss wants to pull together vs push apart
   - Colour-coded row/column labels: neo = red, ndbe = blue
@@ -47,6 +48,10 @@ DEFAULT_ENCODER_CKPT = None   # set via --encoder-ckpt if you want the similarit
 NEO_COLOR   = "#e05555"
 NDBE_COLOR  = "#5577cc"
 ROI_BOX_COLOR = "#ffdd00"
+CROP_WINDOW_COLOR = "#00ddff"  # Cyan
+
+# ── roi helper imports ─────────────────────────────────────────────────────
+from roi_guidance import compute_crop_window_from_roi
 
 # ── denormalise helper ─────────────────────────────────────────────────────────
 _IMAGENET_MEAN = np.array([0.485, 0.456, 0.406])
@@ -77,9 +82,48 @@ def draw_roi_box(ax, roi_record, img_w, img_h, color=ROI_BOX_COLOR, lw=2):
     ax.add_patch(rect)
 
 
+def draw_crop_window(ax, roi_record, img_w, img_h, context_scale=2.0, min_crop_scale=0.4,
+                     max_aspect_ratio=1.5, color=CROP_WINDOW_COLOR, lw=2, debug=False):
+    """Overlay the actual crop window (after context expansion) on matplotlib axes."""
+    if roi_record is None:
+        return
+    try:
+        left, top, right, bottom = compute_crop_window_from_roi(
+            roi_record=roi_record,
+            context_scale=context_scale,
+            min_crop_scale=min_crop_scale,
+            jitter_xy=(0.0, 0.0),  # No jitter for visualization
+            max_aspect_ratio=max_aspect_ratio,
+        )
+        crop_width = right - left
+        crop_height = bottom - top
+
+        if debug:
+            roi_width = roi_record.get("roi_width", 0)
+            roi_height = roi_record.get("roi_height", 0)
+            print(f"  ROI size: {roi_width:.3f}×{roi_height:.3f} | "
+                  f"Crop size: {crop_width:.3f}×{crop_height:.3f} | "
+                  f"min_crop_scale={min_crop_scale}")
+
+        rect = mpatches.Rectangle(
+            (left * img_w, top * img_h),
+            crop_width * img_w,
+            crop_height * img_h,
+            linewidth=lw,
+            edgecolor=color,
+            facecolor="none",
+            linestyle="--",  # Dashed line to distinguish from ROI box
+        )
+        ax.add_patch(rect)
+    except Exception as e:
+        if debug:
+            print(f"  Error computing crop window: {e}")
+        pass  # Silently skip if crop window computation fails
+
+
 def build_args():
     parser = argparse.ArgumentParser(description="Visualise a SupPro training batch.")
-    parser.add_argument("--batch-size",    type=int,   default=8,
+    parser.add_argument("--batch-size",    type=int,   default=12,
                         help="Number of samples to show (will be 50/50 neo/ndbe).")
     parser.add_argument("--roi-json",      type=str,   default=str(DEFAULT_ROI_JSON),
                         help="Path to rois.json. Pass empty string to disable ROI guidance.")
@@ -88,7 +132,7 @@ def build_args():
     parser.add_argument("--roi-focus-prob",type=float, default=1.0,
                         help="Probability of using an ROI crop for view 2 (neo samples only).")
     parser.add_argument("--roi-context-scale", type=float, default=2.0)
-    parser.add_argument("--roi-min-crop-scale", type=float, default=0.4)
+    parser.add_argument("--roi-min-crop-scale", type=float, default=.2)
     parser.add_argument("--roi-center-jitter",  type=float, default=0.05)
     parser.add_argument("--roi-max-aspect-ratio", type=float, default=1.5)
     parser.add_argument("--input-size",    type=int,   default=336)
@@ -100,6 +144,8 @@ def build_args():
                         help="Save figure to this path instead of displaying it.")
     parser.add_argument("--num-batches",   type=int,   default=1,
                         help="How many independent batches to visualise (one figure each).")
+    parser.add_argument("--debug",         action="store_true",
+                        help="Print crop window computation details (ROI size, crop size, min_crop_scale).")
     return parser.parse_args()
 
 
@@ -295,12 +341,19 @@ def visualize_batch(batch_indices, ds, train_df, roi_records, args, model, batch
                 bbox=dict(boxstyle="round,pad=0.2", facecolor=color, alpha=0.85, linewidth=0),
             )
 
-        # ── col 0: original + ROI box ─────────────────────────────────────────
+        # ── col 0: original + ROI box + crop window ───────────────────────────
         ax0 = make_ax(0)
         ax0.imshow(orig_arr)
         h, w = orig_arr.shape[:2]
         if roi_record is not None:
             draw_roi_box(ax0, roi_record, w, h)
+            draw_crop_window(
+                ax0, roi_record, w, h,
+                context_scale=args.roi_context_scale,
+                min_crop_scale=args.roi_min_crop_scale,
+                max_aspect_ratio=args.roi_max_aspect_ratio,
+                debug=args.debug,
+            )
         label_badge(ax0, class_name, row_color)
 
         # ── col 1: view 1 ─────────────────────────────────────────────────────
