@@ -188,6 +188,16 @@ append_supervised_ablation_args() {
     fi
 }
 
+append_roi_records_args() {
+    # Pass --roi-records-path whenever ROI_RECORDS_PATH is set.
+    # Works for both pretrain and finetune stages independently of SUPPRO_ROI.
+    local -n args_ref=$1
+    if [ -z "${ROI_RECORDS_PATH}" ]; then
+        return 0
+    fi
+    args_ref+=(--roi-records-path "${ROI_RECORDS_PATH}")
+}
+
 append_suppro_roi_args() {
     local -n args_ref=$1
 
@@ -325,6 +335,7 @@ for backbone in "${BACKBONES[@]}"; do
                 mapfile -t pretrain_args < <(
                     build_common_args "pretrain" "${backbone}" "${PRETRAIN_LOSS}" "${pretrain_experiment_id}" "${PRETRAIN_EPOCHS}" "${PRETRAIN_SAVE_DIR}" "${CV_NUM_FOLDS}" "${fold_index}"
                 )
+                append_roi_records_args pretrain_args
                 append_suppro_roi_args pretrain_args
                 append_hard_neg_roi_args pretrain_args
                 run_python_train "${pretrain_args[@]}"
@@ -340,6 +351,7 @@ for backbone in "${BACKBONES[@]}"; do
                 mapfile -t pretrain_args < <(
                     build_common_args "pretrain" "${backbone}" "${PRETRAIN_LOSS}" "${pretrain_experiment_id}" "${PRETRAIN_EPOCHS}" "${PRETRAIN_SAVE_DIR}" "${CV_NUM_FOLDS}" "${fold_index}"
                 )
+                append_roi_records_args pretrain_args
                 append_suppro_roi_args pretrain_args
                 append_hard_neg_roi_args pretrain_args
                 run_python_train "${pretrain_args[@]}"

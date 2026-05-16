@@ -143,11 +143,27 @@ def load_datasets(args):
     roi_records = {}
     roi_json = args.roi_json if not args.no_roi else ""
     if roi_json and Path(roi_json).exists():
-        roi_records, meta = load_roi_records_from_json(roi_json)
-        train_paths = set(train_df["img"].astype(str).map(canonicalize_image_path).tolist())
-        roi_records = {k: v for k, v in roi_records.items() if k in train_paths}
+        raw_records, meta = load_roi_records_from_json(roi_json)
+
+        # rois.json keys are RELATIVE paths (../data/center_1/neo/UUID.png).
+        # ImageFolder (used inside build_dataset_dataframe) produces ABSOLUTE paths.
+        # String comparison will always fail. Match on filename stem (UUID) instead —
+        # these are unique across the entire dataset.
+        stem_to_dataset_path = {
+            Path(p).stem: canonicalize_image_path(p)
+            for p in train_df["img"].astype(str).tolist()
+        }
+        roi_records = {}
+        for roi_key, record in raw_records.items():
+            stem = Path(roi_key).stem
+            dataset_path = stem_to_dataset_path.get(stem)
+            if dataset_path is not None:
+                roi_records[dataset_path] = record
+
         ds.set_roi_records(roi_records, active=True)
-        print(f"Loaded {len(roi_records)} ROI records from {roi_json}")
+        print(f"Loaded {len(roi_records)} ROI records (out of {len(raw_records)} total) from {roi_json}")
+        if len(roi_records) == 0:
+            print("  WARNING: 0 records matched — rois.json stems not found in train_df.")
     else:
         print("ROI guidance disabled — both views are full-frame light aug.")
 
@@ -225,11 +241,18 @@ def visualize_batch(batch_indices, ds, train_df, roi_records, args, model, batch
             left=0.01, right=0.99, top=0.94, bottom=0.03,
         )
 
-    col_titles = ["Original + ROI box", "View 1 — full frame, light aug",
-                  "View 2 — ROI crop (neo) / full frame (ndbe)"]
-    for col_idx, title in enumerate(col_titles):
-        ax = fig.add_subplot(gs[0, col_idx])
-        ax.set_title(title, fontsize=7.5, color="#bbbbbb", pad=3)
+    # Column titles via fig.text so they're not overwritten by later add_subplot calls
+    col_x_positions = [1/6, 3/6, 5/6]  # approximate centres of the 3 image columns
+    col_title_strs = [
+        "Original + ROI box",
+        "View 1 — full frame, light aug",
+        "View 2 — ROI crop (neo) / full frame (ndbe)",
+    ]
+    title_y = 0.965
+    for cx, ct in zip(col_x_positions, col_title_strs):
+        fig.text(cx, title_y, ct, ha="center", va="bottom",
+                 fontsize=7.5, color="#bbbbbb",
+                 transform=fig.transFigure)
 
     collected_v1 = []
     collected_v2 = []
@@ -249,18 +272,28 @@ def visualize_batch(batch_indices, ds, train_df, roi_records, args, model, batch
         collected_v2.append(v2)
         collected_labels.append(label)
 
-        orig_img  = Image.open(img_path).convert("RGB")
-        orig_arr  = np.array(orig_img)
-        v1_arr    = tensor_to_uint8(v1)
-        v2_arr    = tensor_to_uint8(v2)
+        orig_img = Image.open(img_path).convert("RGB")
+        orig_arr = np.array(orig_img)
+        v1_arr   = tensor_to_uint8(v1)
+        v2_arr   = tensor_to_uint8(v2)
 
         def make_ax(col):
             ax = fig.add_subplot(gs[row_idx, col])
             ax.set_xticks([]); ax.set_yticks([])
             for spine in ax.spines.values():
                 spine.set_edgecolor(row_color)
-                spine.set_linewidth(1.8)
+                spine.set_linewidth(2.0)
             return ax
+
+        def label_badge(ax, text, color):
+            """Prominent class badge in the top-left corner of an image axes."""
+            ax.text(
+                0.03, 0.97, text,
+                transform=ax.transAxes,
+                fontsize=8, fontweight="bold",
+                color="white", va="top", ha="left",
+                bbox=dict(boxstyle="round,pad=0.2", facecolor=color, alpha=0.85, linewidth=0),
+            )
 
         # ── col 0: original + ROI box ─────────────────────────────────────────
         ax0 = make_ax(0)
@@ -268,21 +301,18 @@ def visualize_batch(batch_indices, ds, train_df, roi_records, args, model, batch
         h, w = orig_arr.shape[:2]
         if roi_record is not None:
             draw_roi_box(ax0, roi_record, w, h)
-        # row label on left
-        ax0.set_ylabel(
-            f"{class_name}\n#{sample_idx}",
-            rotation=0, labelpad=48, fontsize=7,
-            color=row_color, va="center",
-        )
+        label_badge(ax0, class_name, row_color)
 
         # ── col 1: view 1 ─────────────────────────────────────────────────────
         ax1 = make_ax(1)
         ax1.imshow(v1_arr)
+        label_badge(ax1, class_name, row_color)
         ax1.set_xlabel("full frame · light aug", fontsize=6, color="#888888", labelpad=2)
 
         # ── col 2: view 2 ─────────────────────────────────────────────────────
         ax2 = make_ax(2)
         ax2.imshow(v2_arr)
+        label_badge(ax2, class_name, row_color)
         if roi_record is not None and label == 1 and ds.roi_guidance_active:
             v2_label = f"ROI crop · ctx={args.roi_context_scale}×"
             ax2.set_xlabel(v2_label, fontsize=6, color=ROI_BOX_COLOR, labelpad=2)
@@ -352,10 +382,11 @@ def main():
         labels_in_batch = [train_df.loc[i, "label"] for i in batch_indices]
         neo_count  = sum(1 for l in labels_in_batch if l == 1)
         ndbe_count = sum(1 for l in labels_in_batch if l == 0)
+        from roi_guidance import canonicalize_image_path as _canon
         roi_count  = sum(
             1 for i in batch_indices
             if train_df.loc[i, "label"] == 1
-            and __import__("roi_guidance").canonicalize_image_path(train_df.loc[i, "img"]) in roi_records
+            and _canon(train_df.loc[i, "img"]) in roi_records
         )
         print(f"  neo={neo_count}  ndbe={ndbe_count}  neo_with_roi={roi_count}")
 
