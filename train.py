@@ -327,8 +327,18 @@ def get_args_parser():
     parser.add_argument(
         "--roi-min-crop-scale",
         type=float,
-        default=0.4,
+        default=0.6,
         help="Minimum normalized crop size used for ROI-focused crops.",
+    )
+    parser.add_argument(
+        "--roi-max-crop-scale",
+        type=float,
+        default=1.0,
+        help=(
+            "Maximum normalized crop size used for ROI-focused crops. "
+            "Each draw samples uniformly from [--roi-min-crop-scale, --roi-max-crop-scale], "
+            "so both views see the same ROI at different zoom levels per iteration."
+        ),
     )
     parser.add_argument(
         "--roi-center-jitter",
@@ -674,6 +684,11 @@ def resolve_runtime_config(args):
     if not 0.0 < args.roi_min_crop_scale <= 1.0:
         raise ValueError(
             f"--roi-min-crop-scale must be in (0, 1], got {args.roi_min_crop_scale}."
+        )
+    if not args.roi_min_crop_scale <= args.roi_max_crop_scale <= 1.0:
+        raise ValueError(
+            f"--roi-max-crop-scale must be in [--roi-min-crop-scale, 1], "
+            f"got {args.roi_max_crop_scale} (min={args.roi_min_crop_scale})."
         )
     if args.roi_center_jitter < 0.0:
         raise ValueError(f"--roi-center-jitter must be >= 0, got {args.roi_center_jitter}.")

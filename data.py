@@ -50,6 +50,7 @@ class TwoViewDataset(Dataset):
         roi_focus_prob=1.0,
         roi_context_scale=2.0,
         roi_min_crop_scale=0.4,
+        roi_max_crop_scale=1.0,
         roi_center_jitter=0.05,
         roi_max_aspect_ratio=1.5,
     ):
@@ -61,6 +62,7 @@ class TwoViewDataset(Dataset):
         self.roi_focus_prob = min(max(float(roi_focus_prob), 0.0), 1.0)
         self.roi_context_scale = max(float(roi_context_scale), 1e-6)
         self.roi_min_crop_scale = min(max(float(roi_min_crop_scale), 1e-6), 1.0)
+        self.roi_max_crop_scale = min(max(float(roi_max_crop_scale), self.roi_min_crop_scale), 1.0)
         self.roi_center_jitter = max(float(roi_center_jitter), 0.0)
         self.roi_max_aspect_ratio = max(float(roi_max_aspect_ratio), 1.0)
         self.roi_records = {}
@@ -115,13 +117,29 @@ class TwoViewDataset(Dataset):
             "roi_mean_coverage": mean_coverage,
         }
 
+    def _sample_crop_scale(self):
+        return float(torch.empty(1).uniform_(self.roi_min_crop_scale, self.roi_max_crop_scale).item())
+
+    def _sample_jitter(self):
+        return (
+            (2.0 * float(torch.rand(1).item()) - 1.0) * self.roi_center_jitter,
+            (2.0 * float(torch.rand(1).item()) - 1.0) * self.roi_center_jitter,
+        )
+
+    def _random_full_image_crop(self, image):
+        """Random crop at a sampled scale from anywhere in the image (no ROI needed)."""
+        scale = self._sample_crop_scale()
+        w, h = image.size
+        crop_w = max(1, int(scale * w))
+        crop_h = max(1, int(scale * h))
+        left = int(torch.randint(0, max(1, w - crop_w + 1), (1,)).item())
+        top = int(torch.randint(0, max(1, h - crop_h + 1), (1,)).item())
+        return image.crop((left, top, left + crop_w, top + crop_h))
+
     def __getitem__(self, idx):
         img_path = self.df.loc[idx, "img"]
         image = Image.open(img_path).convert("RGB")
         label = int(self.df.loc[idx, "label"])
-        view1 = self.transform1(image)
-        transform2 = self.transform2
-        image2 = image
 
         roi_record = self.roi_records.get(canonicalize_image_path(img_path))
         use_roi = (
@@ -134,21 +152,29 @@ class TwoViewDataset(Dataset):
             # Randomly select one island if multiple exist
             selected_roi_record = self._select_roi_record(roi_record)
 
-            jitter_xy = (
-                (2.0 * float(torch.rand(1).item()) - 1.0) * self.roi_center_jitter,
-                (2.0 * float(torch.rand(1).item()) - 1.0) * self.roi_center_jitter,
+            # Both views get an independently sampled crop scale and jitter so that
+            # the contrastive pair sees the same ROI at different zoom levels.
+            image1 = crop_image_to_roi(
+                image=image,
+                roi_record=selected_roi_record,
+                context_scale=self.roi_context_scale,
+                min_crop_scale=self._sample_crop_scale(),
+                jitter_xy=self._sample_jitter(),
+                max_aspect_ratio=self.roi_max_aspect_ratio,
             )
             image2 = crop_image_to_roi(
                 image=image,
                 roi_record=selected_roi_record,
                 context_scale=self.roi_context_scale,
-                min_crop_scale=self.roi_min_crop_scale,
-                jitter_xy=jitter_xy,
+                min_crop_scale=self._sample_crop_scale(),
+                jitter_xy=self._sample_jitter(),
                 max_aspect_ratio=self.roi_max_aspect_ratio,
             )
-            transform2 = self.roi_transform2
+            return self.transform1(image1), self.roi_transform2(image2), label
 
-        return view1, transform2(image2), label
+        # No ROI: both views get a random crop at the same scale range so the model
+        # cannot distinguish class from crop size.
+        return self.transform1(self._random_full_image_crop(image)), self.transform2(self._random_full_image_crop(image)), label
 
 
 class SupproROIDataset(Dataset):
@@ -161,6 +187,7 @@ class SupproROIDataset(Dataset):
         roi_target_label=1,
         roi_context_scale=2.0,
         roi_min_crop_scale=0.4,
+        roi_max_crop_scale=1.0,
         roi_center_jitter=0.05,
         roi_max_aspect_ratio=1.5,
         hard_neg_transform=None,
@@ -173,6 +200,7 @@ class SupproROIDataset(Dataset):
         self.roi_target_label = int(roi_target_label)
         self.roi_context_scale = max(float(roi_context_scale), 1e-6)
         self.roi_min_crop_scale = min(max(float(roi_min_crop_scale), 1e-6), 1.0)
+        self.roi_max_crop_scale = min(max(float(roi_max_crop_scale), self.roi_min_crop_scale), 1.0)
         self.roi_center_jitter = max(float(roi_center_jitter), 0.0)
         self.roi_max_aspect_ratio = max(float(roi_max_aspect_ratio), 1.0)
         self.roi_records = {}
@@ -267,6 +295,15 @@ class SupproROIDataset(Dataset):
             "hard_neg_roi_mean_coverage": mean_coverage,
         }
 
+    def _sample_crop_scale(self):
+        return float(torch.empty(1).uniform_(self.roi_min_crop_scale, self.roi_max_crop_scale).item())
+
+    def _sample_jitter(self):
+        return (
+            (2.0 * float(torch.rand(1).item()) - 1.0) * self.roi_center_jitter,
+            (2.0 * float(torch.rand(1).item()) - 1.0) * self.roi_center_jitter,
+        )
+
     def _select_roi_record(self, roi_record):
         roi_islands = roi_record.get("roi_islands")
         if not roi_islands:
@@ -295,16 +332,12 @@ class SupproROIDataset(Dataset):
             and roi_record is not None
         ):
             selected_roi_record = self._select_roi_record(roi_record)
-            jitter_xy = (
-                (2.0 * float(torch.rand(1).item()) - 1.0) * self.roi_center_jitter,
-                (2.0 * float(torch.rand(1).item()) - 1.0) * self.roi_center_jitter,
-            )
             roi_image = crop_image_to_roi(
                 image=image,
                 roi_record=selected_roi_record,
                 context_scale=self.roi_context_scale,
-                min_crop_scale=self.roi_min_crop_scale,
-                jitter_xy=jitter_xy,
+                min_crop_scale=self._sample_crop_scale(),
+                jitter_xy=self._sample_jitter(),
                 max_aspect_ratio=self.roi_max_aspect_ratio,
             )
             roi_view = self.roi_transform(roi_image)
@@ -317,16 +350,12 @@ class SupproROIDataset(Dataset):
             and hard_neg_record is not None
         ):
             selected_hard_neg_record = self._select_roi_record(hard_neg_record)
-            jitter_xy = (
-                (2.0 * float(torch.rand(1).item()) - 1.0) * self.roi_center_jitter,
-                (2.0 * float(torch.rand(1).item()) - 1.0) * self.roi_center_jitter,
-            )
             hard_neg_image = crop_image_to_roi(
                 image=image,
                 roi_record=selected_hard_neg_record,
                 context_scale=self.roi_context_scale,
-                min_crop_scale=self.roi_min_crop_scale,
-                jitter_xy=jitter_xy,
+                min_crop_scale=self._sample_crop_scale(),
+                jitter_xy=self._sample_jitter(),
                 max_aspect_ratio=self.roi_max_aspect_ratio,
             )
             hard_neg_view = self.hard_neg_transform(hard_neg_image)
@@ -374,25 +403,34 @@ class BalancedBatchSampler(BatchSampler):
             self.num_batches = int(math.ceil(len(labels) / float(self.batch_size)))
 
     def __iter__(self):
-        positive_indices = torch.tensor(self.positive_indices, dtype=torch.long)
-        negative_indices = torch.tensor(self.negative_indices, dtype=torch.long)
+        pos_tensor = torch.tensor(self.positive_indices, dtype=torch.long)
+        neg_tensor = torch.tensor(self.negative_indices, dtype=torch.long)
+
+        # Shuffle each class pool independently at epoch start; reshuffle when exhausted
+        # so each sample is seen floor or ceil times rather than with high replacement variance.
+        pos_pool = pos_tensor[torch.randperm(len(pos_tensor), generator=self.generator)]
+        neg_pool = neg_tensor[torch.randperm(len(neg_tensor), generator=self.generator)]
+        pos_ptr = 0
+        neg_ptr = 0
 
         for _ in range(self.num_batches):
-            pos_choice = positive_indices[
-                torch.randint(
-                    len(positive_indices),
-                    (self.half_batch_size,),
-                    generator=self.generator,
-                )
-            ]
-            neg_choice = negative_indices[
-                torch.randint(
-                    len(negative_indices),
-                    (self.half_batch_size,),
-                    generator=self.generator,
-                )
-            ]
-            batch = torch.cat([pos_choice, neg_choice], dim=0)
+            pos_indices = []
+            for _ in range(self.half_batch_size):
+                if pos_ptr >= len(pos_pool):
+                    pos_pool = pos_tensor[torch.randperm(len(pos_tensor), generator=self.generator)]
+                    pos_ptr = 0
+                pos_indices.append(pos_pool[pos_ptr].item())
+                pos_ptr += 1
+
+            neg_indices = []
+            for _ in range(self.half_batch_size):
+                if neg_ptr >= len(neg_pool):
+                    neg_pool = neg_tensor[torch.randperm(len(neg_tensor), generator=self.generator)]
+                    neg_ptr = 0
+                neg_indices.append(neg_pool[neg_ptr].item())
+                neg_ptr += 1
+
+            batch = torch.tensor(pos_indices + neg_indices, dtype=torch.long)
             permutation = torch.randperm(batch.numel(), generator=self.generator)
             yield batch[permutation].tolist()
 
@@ -568,7 +606,8 @@ def prepare_datasets(args, device):
         roi_target_label=getattr(args, "gradcam_target_class", 1),
         roi_focus_prob=getattr(args, "roi_focus_prob", 1.0),
         roi_context_scale=getattr(args, "roi_context_scale", 2.0),
-        roi_min_crop_scale=getattr(args, "roi_min_crop_scale", 0.4),
+        roi_min_crop_scale=getattr(args, "roi_min_crop_scale", 0.6),
+        roi_max_crop_scale=getattr(args, "roi_max_crop_scale", 1.0),
         roi_center_jitter=getattr(args, "roi_center_jitter", 0.05),
         roi_max_aspect_ratio=getattr(args, "roi_max_aspect_ratio", 1.5),
     )
