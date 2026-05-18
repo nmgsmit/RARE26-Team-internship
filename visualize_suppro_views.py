@@ -3,21 +3,20 @@ Visualize exact SupPro 2-view pairs with real augmentations.
 
 Shows what the SupPro loss actually sees during training in a grid:
 - Rows: samples (default 5)
-- Columns: Original+ROI | View1 | View2a | View2b
+- Columns: Original+ROI | View1 | View2
 - View1: random crop 0.9-1.0
-- View2a & View2b: ROI crops (if available) with independent random choices,
-  showing augmentation variation. If no ROI, both are random crops.
-- Uses exact training augmentations
+- View2: ROI crop (if available) or random fallback
+- Uses exact training augmentations at selectable intensity level
 
 Usage:
-    # Positive samples (default)
-    python visualize_suppro_views.py --label 1
+    # Positive samples with low augmentation
+    python visualize_suppro_views.py --label 1 --augmentation-intensity 1
 
-    # Negative samples
-    python visualize_suppro_views.py --label 0
+    # Negative samples with strong augmentation
+    python visualize_suppro_views.py --label 0 --augmentation-intensity 3
 
     # Custom number of samples
-    python visualize_suppro_views.py --label 1 --num-samples 10
+    python visualize_suppro_views.py --label 1 --num-samples 10 --augmentation-intensity 2
 """
 
 import argparse
@@ -130,7 +129,7 @@ def tensor_to_pil(tensor):
 
 
 def create_sample_row(img_path, label, roi_records, transform1, transform2, augmentation_intensity):
-    """Create a 1x4 row for one sample: Original+ROI | View1 | View2a | View2b."""
+    """Create a 1x3 row for one sample: Original+ROI | View1 | View2."""
     img = Image.open(img_path).convert("RGB")
     canonical_path = canonicalize_image_path(img_path)
     roi_record = roi_records.get(canonical_path)
@@ -144,58 +143,34 @@ def create_sample_row(img_path, label, roi_records, transform1, transform2, augm
     view1 = transform1(view1_crop)
     col2 = tensor_to_pil(view1)
 
-    # Column 3: View 2a (ROI crop or random fallback, augmented)
+    # Column 3: View 2 (ROI crop or random fallback, augmented)
     if roi_record:
         # ROI crop at 0.4-0.8
-        roi_scale_a = sample_crop_scale(0.4, 0.8)
-        jitter_xy_a = sample_jitter(0.05)
+        roi_scale = sample_crop_scale(0.4, 0.8)
+        jitter_xy = sample_jitter(0.05)
         try:
-            view2a_crop = crop_image_to_roi(
+            view2_crop = crop_image_to_roi(
                 image=img,
                 roi_record=roi_record,
                 context_scale=2.0,
-                min_crop_scale=roi_scale_a,
-                jitter_xy=jitter_xy_a,
+                min_crop_scale=roi_scale,
+                jitter_xy=jitter_xy,
                 max_aspect_ratio=DEFAULT_ROI_MAX_ASPECT_RATIO,
             )
         except:
-            view2a_crop = get_random_crop(img, 0.9, 1.0)
-    else:
-        # Random crop 0.9-1.0
-        view2a_crop = get_random_crop(img, 0.9, 1.0)
-
-    view2a = transform2(view2a_crop)
-    col3 = tensor_to_pil(view2a)
-
-    # Column 4: View 2b (ROI crop with independent randomness, or random fallback)
-    if roi_record:
-        # Another ROI crop at 0.4-0.8 with independent random choices
-        roi_scale_b = sample_crop_scale(0.4, 0.8)
-        jitter_xy_b = sample_jitter(0.05)
-        try:
-            view2b_crop = crop_image_to_roi(
-                image=img,
-                roi_record=roi_record,
-                context_scale=2.0,
-                min_crop_scale=roi_scale_b,
-                jitter_xy=jitter_xy_b,
-                max_aspect_ratio=DEFAULT_ROI_MAX_ASPECT_RATIO,
-            )
-        except:
-            view2b_crop = get_random_crop(img, 0.9, 1.0)
+            view2_crop = get_random_crop(img, 0.9, 1.0)
     else:
         # Random crop 0.9-1.0 (fallback when no ROI)
-        view2b_crop = get_random_crop(img, 0.9, 1.0)
+        view2_crop = get_random_crop(img, 0.9, 1.0)
 
-    view2b = transform2(view2b_crop)
-    col4 = tensor_to_pil(view2b)
+    view2 = transform2(view2_crop)
+    col3 = tensor_to_pil(view2)
 
     # Combine columns horizontally
-    row = Image.new("RGB", (TILE_SIZE * 4, TILE_SIZE), (0, 0, 0))
+    row = Image.new("RGB", (TILE_SIZE * 3, TILE_SIZE), (0, 0, 0))
     row.paste(col1, (0, 0))
     row.paste(col2, (TILE_SIZE, 0))
     row.paste(col3, (TILE_SIZE * 2, 0))
-    row.paste(col4, (TILE_SIZE * 3, 0))
 
     return row
 
@@ -282,15 +257,14 @@ def main():
     label_name = "POSITIVE" if args.label == 1 else "NEGATIVE"
     print(f"Creating SupPro view visualization for {num_samples} {label_name} samples...")
     print(f"Augmentation intensity: {args.augmentation_intensity}")
-    print(f"Grid layout: {num_samples} rows x 4 columns")
+    print(f"Grid layout: {num_samples} rows x 3 columns")
     print(f"  Column 1: Original + Grad-CAM ROI bbox")
     print(f"  Column 2: View 1 (random crop 0.9-1.0 + augmentation)")
-    print(f"  Column 3: View 2a (ROI crop 0.4-0.8 + augmentation, or random fallback)")
-    print(f"  Column 4: View 2b (ROI crop with independent randomness, or random fallback)")
+    print(f"  Column 3: View 2 (ROI crop 0.4-0.8 + augmentation, or random fallback)")
 
     # Create grid of all samples
     total_height = TILE_SIZE * num_samples
-    total_width = TILE_SIZE * 4
+    total_width = TILE_SIZE * 3
 
     grid = Image.new("RGB", (total_width, total_height), (0, 0, 0))
 
