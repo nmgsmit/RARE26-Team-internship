@@ -57,8 +57,7 @@ BASE_TEMPERATURE="${BASE_TEMPERATURE:-0.1}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 PRETRAIN_EPOCHS="${PRETRAIN_EPOCHS:-50}"
 FINETUNE_EPOCHS="${FINETUNE_EPOCHS:-30}"
-
-# Augmentation intensity: 1 (low/conservative), 2 (medium/balanced), 3 (strong/aggressive)
+# Augmentation intensity: 1 (low/conservative), 2 (medium/balanced), 3 (strong/aggressive), 4 (extreme)
 # Recommended: 1 for endoscopy (avoids unrealistic flips/rotations)
 AUGMENTATION_INTENSITY="${AUGMENTATION_INTENSITY:-3}"
 

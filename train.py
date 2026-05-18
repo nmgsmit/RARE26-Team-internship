@@ -180,12 +180,13 @@ def get_args_parser():
         "--augmentation-intensity",
         type=int,
         default=3,
-        choices=[1, 2, 3],
+        choices=[1, 2, 3, 4],
         help=(
             "Augmentation intensity level: "
             "1 (low/conservative - minimal flips/rotation, good for endoscopy), "
             "2 (medium/balanced), "
-            "3 (strong/aggressive - current default with max flips/rotation)"
+            "3 (strong/aggressive - current default with max flips/rotation), "
+            "4 (extreme - very aggressive with 50% v-flip and ±45° rotation)"
         ),
     )
     parser.add_argument("--experiment-id", type=str, default="rare25-run")
@@ -833,9 +834,9 @@ def resolve_runtime_config(args):
             f"got {args.fold_index}."
         )
 
-    if args.augmentation_intensity not in [1, 2, 3]:
+    if args.augmentation_intensity not in [1, 2, 3, 4]:
         raise ValueError(
-            f"--augmentation-intensity must be 1 (low), 2 (medium), or 3 (strong), "
+            f"--augmentation-intensity must be 1 (low), 2 (medium), 3 (strong), or 4 (extreme), "
             f"got {args.augmentation_intensity}."
         )
 

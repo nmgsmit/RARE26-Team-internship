@@ -206,8 +206,8 @@ def main():
         "--augmentation-intensity",
         type=int,
         default=1,
-        choices=[1, 2, 3],
-        help="Augmentation intensity level (1=low, 2=medium, 3=strong)"
+        choices=[1, 2, 3, 4],
+        help="Augmentation intensity level (1=low, 2=medium, 3=strong, 4=extreme)"
     )
     parser.add_argument(
         "--seed",

@@ -73,6 +73,21 @@ AUGMENTATION_PRESETS = {
         "roi_color_saturation": 0.03,
         "roi_color_hue": 0.005,
     },
+    4: {  # Extreme intensity (very aggressive - for hard augmentation studies)
+        "name": "extreme",
+        "h_flip_p": 0.5,
+        "v_flip_p": 0.5,  # High vertical flip probability
+        "rotation_deg": 45,  # Large rotation range
+        "color_brightness": 0.2,
+        "color_contrast": 0.2,
+        "color_saturation": 0.2,
+        "color_hue": 0.03,
+        "roi_rotation_deg": 15,
+        "roi_color_brightness": 0.05,
+        "roi_color_contrast": 0.05,
+        "roi_color_saturation": 0.05,
+        "roi_color_hue": 0.007,
+    },
 }
 
 
