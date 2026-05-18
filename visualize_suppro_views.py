@@ -4,6 +4,9 @@ Visualize exact SupPro 2-view pairs with real augmentations.
 Shows what the SupPro loss actually sees during training in a grid:
 - Rows: samples (default 5)
 - Columns: Original+ROI | View1 | View2a | View2b
+- View1: random crop 0.9-1.0
+- View2a & View2b: ROI crops (if available) with independent random choices,
+  showing augmentation variation. If no ROI, both are random crops.
 - Uses exact training augmentations
 
 Usage:
@@ -144,15 +147,15 @@ def create_sample_row(img_path, label, roi_records, transform1, transform2, augm
     # Column 3: View 2a (ROI crop or random fallback, augmented)
     if roi_record:
         # ROI crop at 0.4-0.8
-        roi_scale = sample_crop_scale(0.4, 0.8)
-        jitter_xy = sample_jitter(0.05)
+        roi_scale_a = sample_crop_scale(0.4, 0.8)
+        jitter_xy_a = sample_jitter(0.05)
         try:
             view2a_crop = crop_image_to_roi(
                 image=img,
                 roi_record=roi_record,
                 context_scale=2.0,
-                min_crop_scale=roi_scale,
-                jitter_xy=jitter_xy,
+                min_crop_scale=roi_scale_a,
+                jitter_xy=jitter_xy_a,
                 max_aspect_ratio=DEFAULT_ROI_MAX_ASPECT_RATIO,
             )
         except:
@@ -164,8 +167,26 @@ def create_sample_row(img_path, label, roi_records, transform1, transform2, augm
     view2a = transform2(view2a_crop)
     col3 = tensor_to_pil(view2a)
 
-    # Column 4: View 2b (random fallback crop, different augmentation)
-    view2b_crop = get_random_crop(img, 0.9, 1.0)
+    # Column 4: View 2b (ROI crop with independent randomness, or random fallback)
+    if roi_record:
+        # Another ROI crop at 0.4-0.8 with independent random choices
+        roi_scale_b = sample_crop_scale(0.4, 0.8)
+        jitter_xy_b = sample_jitter(0.05)
+        try:
+            view2b_crop = crop_image_to_roi(
+                image=img,
+                roi_record=roi_record,
+                context_scale=2.0,
+                min_crop_scale=roi_scale_b,
+                jitter_xy=jitter_xy_b,
+                max_aspect_ratio=DEFAULT_ROI_MAX_ASPECT_RATIO,
+            )
+        except:
+            view2b_crop = get_random_crop(img, 0.9, 1.0)
+    else:
+        # Random crop 0.9-1.0 (fallback when no ROI)
+        view2b_crop = get_random_crop(img, 0.9, 1.0)
+
     view2b = transform2(view2b_crop)
     col4 = tensor_to_pil(view2b)
 
@@ -264,8 +285,8 @@ def main():
     print(f"Grid layout: {num_samples} rows x 4 columns")
     print(f"  Column 1: Original + Grad-CAM ROI bbox")
     print(f"  Column 2: View 1 (random crop 0.9-1.0 + augmentation)")
-    print(f"  Column 3: View 2a (ROI crop 0.4-0.8 or fallback + augmentation)")
-    print(f"  Column 4: View 2b (random fallback crop + augmentation)")
+    print(f"  Column 3: View 2a (ROI crop 0.4-0.8 + augmentation, or random fallback)")
+    print(f"  Column 4: View 2b (ROI crop with independent randomness, or random fallback)")
 
     # Create grid of all samples
     total_height = TILE_SIZE * num_samples
