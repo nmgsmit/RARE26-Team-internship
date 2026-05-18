@@ -343,6 +343,8 @@ def get_args_parser():
     parser.add_argument("--lambda-supmin", type=float, default=None, help=SUPPRESS)
     parser.add_argument("--lambda-suppro", type=float, default=None, help=SUPPRESS)
 
+    parser.add_argument("--crop-scale", type=float, default=0.6,)
+    
     parser.set_defaults(gradcam_skip_empty_masks=True)
     return parser
 
