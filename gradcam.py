@@ -468,10 +468,6 @@ def _compute_cam_activation_stats(raw_cam_tensor):
     }
 
 
-def _format_threshold(threshold):
-    return f"{threshold:.2f}"
-
-
 def _compute_threshold_overlap_scores(cam_tensor, expert_masks, thresholds):
     threshold_metrics = []
     for threshold in thresholds:

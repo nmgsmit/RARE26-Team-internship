@@ -445,9 +445,6 @@ def get_args_parser():
     parser.add_argument("--post-train-gradcam-log-worst-k", type=int, default=10)
     parser.add_argument("--post-train-gradcam-log-hard-neg-k", type=int, default=10)
 
-    parser.add_argument("--lambda-ce", type=float, default=1.0, help=SUPPRESS)
-    parser.add_argument("--lambda-supmin", type=float, default=1.0, help=SUPPRESS)
-    parser.add_argument("--lambda-suppro", type=float, default=1.0, help=SUPPRESS)
     parser.add_argument(
         "--balanced-sampler",
         action="store_true",
