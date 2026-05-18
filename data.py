@@ -72,15 +72,17 @@ def build_eval_transform(input_size):
 
 def prepare_datasets(args, device):
     input_size = getattr(args, "input_size", 336)
+    crop_scale = getattr(args, "crop_scale", 0.6)
     data_dir = DEFAULT_DATA_DIR
     num_folds = int(getattr(args, "num_folds", 1))
     fold_index = int(getattr(args, "fold_index", 0))
     data_seed = int(getattr(args, "seed", 42))
     print(f"Using input size: {input_size}x{input_size}")
+    print(f"Using crop scale: ({crop_scale}, 1.0)")
 
     train_transform_1 = Compose([
         ToImage(),
-        RandomResizedCrop((input_size, input_size), scale=(0.6, 1.0)),
+        RandomResizedCrop((input_size, input_size), scale=(crop_scale, 1.0)),
         RandomHorizontalFlip(p=0.5),
         RandomVerticalFlip(p=0.2),
         RandomRotation(degrees=10),
@@ -90,7 +92,7 @@ def prepare_datasets(args, device):
     ])
     train_transform_2 = Compose([
         ToImage(),
-        RandomResizedCrop((input_size, input_size), scale=(0.6, 1.0)),
+        RandomResizedCrop((input_size, input_size), scale=(crop_scale, 1.0)),
         RandomHorizontalFlip(p=0.5),
         RandomVerticalFlip(p=0.2),
         RandomRotation(degrees=10),
