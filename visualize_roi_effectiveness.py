@@ -330,13 +330,18 @@ def main():
         # (This ensures the paths match what's in the JSON)
         canonical_paths_in_roi = set(roi_records.keys())
         df_filtered["canonical_img"] = df_filtered["img"].astype(str).map(canonicalize_image_path)
-        df_filtered = df_filtered[df_filtered["canonical_img"].isin(canonical_paths_in_roi)].reset_index(drop=True)
 
-        if len(df_filtered) == 0:
+        # Keep track of which samples have ROI records
+        df_filtered["has_roi"] = df_filtered["canonical_img"].isin(canonical_paths_in_roi)
+        df_with_roi = df_filtered[df_filtered["has_roi"]].reset_index(drop=True)
+
+        if len(df_with_roi) == 0:
             print(f"No {label_name} samples found with ROI records in {roi_json_path}")
+            print(f"Total {label_name} samples in dataset: {len(df_filtered)}")
             return
 
-        print(f"Found {len(df_filtered)} {label_name} samples with ROI guidance available")
+        print(f"Found {len(df_with_roi)} {label_name} samples with ROI guidance available (out of {len(df_filtered)} total)")
+        df_filtered = df_with_roi
     else:
         print(f"ROI JSON not found at {roi_json_path}, will show all {label_name} samples without ROI guidance")
 
@@ -353,9 +358,17 @@ def main():
     for i, idx in enumerate(indices):
         row = df_filtered.iloc[idx]
         img_path = row["img"]
+        canonical_path = row["canonical_img"]  # Use pre-computed canonical path
 
-        canonical_path = canonicalize_image_path(img_path)
         roi_record = roi_records.get(canonical_path)
+
+        if not roi_record:
+            # This shouldn't happen if filtering worked correctly, but add fallback
+            print(f"  WARNING: ROI record not found for {canonical_path}")
+            # Try alternative paths
+            roi_record = roi_records.get(str(img_path))
+            if not roi_record:
+                print(f"    Also tried: {str(img_path)}")
 
         sample_name = Path(img_path).stem
         output_path = output_dir / f"{label_name.lower()}_{i:02d}_{sample_name}.png"
