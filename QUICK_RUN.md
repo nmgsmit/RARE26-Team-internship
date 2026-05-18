@@ -1,43 +1,34 @@
 # Quick Run Commands
 
-## Basic Run
+## Standard Run Template (Copy & Paste)
 
 ```bash
-export EXPERIMENT_ID="my_experiment"
+export EXPERIMENT_ID="experiment_name"
 export AUGMENTATION_INTENSITY=1
-export STAGES_CSV="pretrain,finetune"
-sbatch jobscript_slurm.sh
-```
-
-## With ROI Min Crop Scale
-
-```bash
-export EXPERIMENT_ID="roi_zoom_test"
+export ROI_FOCUS_PROB=1.0
+export ROI_NEGATIVE_FOCUS_PROB=0.0
+export ROI_WARMUP_EPOCHS=0
 export ROI_MIN_CROP_SCALE=0.4
 export STAGES_CSV="pretrain,finetune"
+export WANDB_GROUP="group_name"
 sbatch jobscript_slurm.sh
 ```
 
-## With Warmup
+---
 
-```bash
-export EXPERIMENT_ID="with_warmup"
-export ROI_WARMUP_EPOCHS=5
-export STAGES_CSV="pretrain,finetune"
-sbatch jobscript_slurm.sh
-```
+## Quick Examples (Modify the Template Above)
 
-## With Negative ROI
+### With Different ROI Min Crop Scale
+Change: `export ROI_MIN_CROP_SCALE=0.6`
 
-```bash
-export EXPERIMENT_ID="with_neg_roi"
-export ROI_NEGATIVE_FOCUS_PROB=0.5
-export HARD_NEG_ROI_RECORDS_PATH="./path/to/negative_rois.json"
-export STAGES_CSV="pretrain,finetune"
-sbatch jobscript_slurm.sh
-```
+### With Warmup
+Change: `export ROI_WARMUP_EPOCHS=5`
 
-## Augmentation Ablation
+### With Negative ROI
+Change: `export ROI_NEGATIVE_FOCUS_PROB=0.5` and add:
+`export HARD_NEG_ROI_RECORDS_PATH="./path/to/negative_rois.json"`
+
+### Augmentation Ablation
 
 ```bash
 for intensity in 1 2 3; do
