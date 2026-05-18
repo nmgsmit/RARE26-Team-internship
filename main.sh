@@ -45,6 +45,9 @@ ROI_CONTEXT_SCALE="${ROI_CONTEXT_SCALE:-2.0}"
 ROI_MIN_CROP_SCALE="${ROI_MIN_CROP_SCALE:-0.4}"
 ROI_CENTER_JITTER="${ROI_CENTER_JITTER:-0.05}"
 ROI_MAX_ASPECT_RATIO="${ROI_MAX_ASPECT_RATIO:-1.5}"
+ROI_FOCUS_PROB="${ROI_FOCUS_PROB:-1.0}"
+ROI_NEGATIVE_FOCUS_PROB="${ROI_NEGATIVE_FOCUS_PROB:-0.0}"
+ROI_WARMUP_EPOCHS="${ROI_WARMUP_EPOCHS:-0}"
 
 # Training and optimization.
 TEMPERATURE="${TEMPERATURE:-0.1}"
@@ -52,6 +55,10 @@ BASE_TEMPERATURE="${BASE_TEMPERATURE:-0.1}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 PRETRAIN_EPOCHS="${PRETRAIN_EPOCHS:-50}"
 FINETUNE_EPOCHS="${FINETUNE_EPOCHS:-30}"
+
+# Augmentation intensity: 1 (low/conservative), 2 (medium/balanced), 3 (strong/aggressive)
+# Recommended: 1 for endoscopy (avoids unrealistic flips/rotations)
+AUGMENTATION_INTENSITY="${AUGMENTATION_INTENSITY:-3}"
 
 LR="${LR:-1e-5}"
 BASELINE_LR="${BASELINE_LR:-1e-4}"
@@ -173,7 +180,13 @@ build_common_args() {
         --roi-min-crop-scale "${ROI_MIN_CROP_SCALE}"
         --roi-center-jitter "${ROI_CENTER_JITTER}"
         --roi-max-aspect-ratio "${ROI_MAX_ASPECT_RATIO}"
+        --roi-focus-prob "${ROI_FOCUS_PROB}"
+        --roi-negative-focus-prob "${ROI_NEGATIVE_FOCUS_PROB}"
+        --roi-warmup-epochs "${ROI_WARMUP_EPOCHS}"
     )
+
+    # Augmentation intensity
+    args+=(--augmentation-intensity "${AUGMENTATION_INTENSITY}")
 
     printf '%s\n' "${args[@]}"
 }

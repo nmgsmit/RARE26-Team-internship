@@ -174,6 +174,18 @@ def get_args_parser():
         help="Zero-based validation fold index when --num-folds > 1.",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--augmentation-intensity",
+        type=int,
+        default=3,
+        choices=[1, 2, 3],
+        help=(
+            "Augmentation intensity level: "
+            "1 (low/conservative - minimal flips/rotation, good for endoscopy), "
+            "2 (medium/balanced), "
+            "3 (strong/aggressive - current default with max flips/rotation)"
+        ),
+    )
     parser.add_argument("--experiment-id", type=str, default="rare25-run")
     parser.add_argument("--save-dir", type=str, default="./checkpoints")
     parser.add_argument(
@@ -317,6 +329,18 @@ def get_args_parser():
         type=float,
         default=1.0,
         help="Probability of replacing the second positive training view with an ROI-focused crop.",
+    )
+    parser.add_argument(
+        "--roi-negative-focus-prob",
+        type=float,
+        default=0.0,
+        help="Probability of using a detected negative ROI region (hard negative) for the second view in negative samples.",
+    )
+    parser.add_argument(
+        "--roi-warmup-epochs",
+        type=int,
+        default=0,
+        help="Number of epochs to skip ROI crops and use random full-context crops for both views (warmup phase).",
     )
     parser.add_argument(
         "--roi-context-scale",
@@ -679,6 +703,10 @@ def resolve_runtime_config(args):
         raise ValueError("--init-encoder-ckpt is only supported for pretrain stage.")
     if not 0.0 <= args.roi_focus_prob <= 1.0:
         raise ValueError(f"--roi-focus-prob must be in [0, 1], got {args.roi_focus_prob}.")
+    if not 0.0 <= args.roi_negative_focus_prob <= 1.0:
+        raise ValueError(f"--roi-negative-focus-prob must be in [0, 1], got {args.roi_negative_focus_prob}.")
+    if args.roi_warmup_epochs < 0:
+        raise ValueError(f"--roi-warmup-epochs must be >= 0, got {args.roi_warmup_epochs}.")
     if args.roi_context_scale <= 0.0:
         raise ValueError(f"--roi-context-scale must be > 0, got {args.roi_context_scale}.")
     if not 0.0 < args.roi_min_crop_scale <= 1.0:
@@ -759,6 +787,12 @@ def resolve_runtime_config(args):
         raise ValueError(
             f"--fold-index must be in [0, {args.num_folds - 1}] when using cross-validation, "
             f"got {args.fold_index}."
+        )
+
+    if args.augmentation_intensity not in [1, 2, 3]:
+        raise ValueError(
+            f"--augmentation-intensity must be 1 (low), 2 (medium), or 3 (strong), "
+            f"got {args.augmentation_intensity}."
         )
 
     if args.baseline_lr is None:
@@ -1172,6 +1206,9 @@ def main(args):
     roi_refresh_state = {"completed": False}
 
     for epoch in range(args.epochs):
+        # Update dataset's current epoch (for ROI warmup control)
+        train_ds.set_epoch(epoch)
+
         if args.roi_guided_training and not roi_refresh_state["completed"] and epoch >= args.roi_start_epoch:
             refresh_train_roi_guidance(args, model, train_ds, device, epoch)
             roi_refresh_state["completed"] = True

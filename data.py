@@ -26,6 +26,55 @@ from roi_guidance import canonicalize_image_path, crop_image_to_roi
 
 DEFAULT_DATA_DIR = "../data/Challenge_train_data"
 
+# Augmentation intensity presets
+AUGMENTATION_PRESETS = {
+    1: {  # Low intensity (conservative)
+        "name": "low",
+        "h_flip_p": 0.1,
+        "v_flip_p": 0.0,  # Avoid vertical flip for endoscopy (fold directionality)
+        "rotation_deg": 2,
+        "color_brightness": 0.05,
+        "color_contrast": 0.05,
+        "color_saturation": 0.05,
+        "color_hue": 0.01,
+        "roi_rotation_deg": 2,
+        "roi_color_brightness": 0.02,
+        "roi_color_contrast": 0.02,
+        "roi_color_saturation": 0.02,
+        "roi_color_hue": 0.003,
+    },
+    2: {  # Medium intensity (balanced)
+        "name": "medium",
+        "h_flip_p": 0.3,
+        "v_flip_p": 0.1,
+        "rotation_deg": 5,
+        "color_brightness": 0.08,
+        "color_contrast": 0.08,
+        "color_saturation": 0.08,
+        "color_hue": 0.015,
+        "roi_rotation_deg": 3,
+        "roi_color_brightness": 0.03,
+        "roi_color_contrast": 0.03,
+        "roi_color_saturation": 0.03,
+        "roi_color_hue": 0.005,
+    },
+    3: {  # Strong intensity (aggressive - current default)
+        "name": "strong",
+        "h_flip_p": 0.5,
+        "v_flip_p": 0.2,
+        "rotation_deg": 10,
+        "color_brightness": 0.1,
+        "color_contrast": 0.1,
+        "color_saturation": 0.1,
+        "color_hue": 0.02,
+        "roi_rotation_deg": 5,
+        "roi_color_brightness": 0.03,
+        "roi_color_contrast": 0.03,
+        "roi_color_saturation": 0.03,
+        "roi_color_hue": 0.005,
+    },
+}
+
 
 def seed_worker(worker_id):
     worker_seed = torch.initial_seed() % (2**32)
@@ -48,11 +97,13 @@ class TwoViewDataset(Dataset):
         roi_transform2=None,
         roi_target_label=1,
         roi_focus_prob=1.0,
+        roi_negative_focus_prob=0.0,
         roi_context_scale=2.0,
         roi_min_crop_scale=0.4,
         roi_max_crop_scale=1.0,
         roi_center_jitter=0.05,
         roi_max_aspect_ratio=1.5,
+        roi_warmup_epochs=0,
     ):
         self.df = df.reset_index(drop=True)
         self.transform1 = transform1
@@ -60,13 +111,18 @@ class TwoViewDataset(Dataset):
         self.roi_transform2 = roi_transform2 or transform2
         self.roi_target_label = int(roi_target_label)
         self.roi_focus_prob = min(max(float(roi_focus_prob), 0.0), 1.0)
+        self.roi_negative_focus_prob = min(max(float(roi_negative_focus_prob), 0.0), 1.0)
         self.roi_context_scale = max(float(roi_context_scale), 1e-6)
         self.roi_min_crop_scale = min(max(float(roi_min_crop_scale), 1e-6), 1.0)
         self.roi_max_crop_scale = min(max(float(roi_max_crop_scale), self.roi_min_crop_scale), 1.0)
         self.roi_center_jitter = max(float(roi_center_jitter), 0.0)
         self.roi_max_aspect_ratio = max(float(roi_max_aspect_ratio), 1.0)
+        self.roi_warmup_epochs = max(int(roi_warmup_epochs), 0)
         self.roi_records = {}
         self.roi_guidance_active = False
+        self.negative_roi_records = {}
+        self.negative_roi_guidance_active = False
+        self.current_epoch = 0
 
     def __len__(self):
         return len(self.df)
@@ -89,6 +145,22 @@ class TwoViewDataset(Dataset):
     def clear_roi_records(self):
         self.roi_records = {}
         self.roi_guidance_active = False
+
+    def set_negative_roi_records(self, roi_records, active=True):
+        """Set ROI records for negative (hard-negative) regions."""
+        self.negative_roi_records = {
+            canonicalize_image_path(key): value for key, value in roi_records.items()
+        }
+        self.negative_roi_guidance_active = bool(active) and len(self.negative_roi_records) > 0
+
+    def clear_negative_roi_records(self):
+        """Clear negative ROI records."""
+        self.negative_roi_records = {}
+        self.negative_roi_guidance_active = False
+
+    def set_epoch(self, epoch):
+        """Set the current epoch (used for warmup control)."""
+        self.current_epoch = int(epoch)
 
     def get_roi_guidance_stats(self):
         positive_image_paths = self.df.loc[
@@ -136,45 +208,89 @@ class TwoViewDataset(Dataset):
         top = int(torch.randint(0, max(1, h - crop_h + 1), (1,)).item())
         return image.crop((left, top, left + crop_w, top + crop_h))
 
+    def _random_full_image_crop_fixed_scale(self, image, min_scale, max_scale):
+        """
+        Random crop from the image with a fixed scale range.
+
+        Args:
+            image: PIL Image to crop from
+            min_scale: Minimum crop scale (e.g., 0.9 for 90%)
+            max_scale: Maximum crop scale (e.g., 1.0 for 100%)
+
+        Returns:
+            Cropped PIL Image
+        """
+        scale = float(torch.empty(1).uniform_(min_scale, max_scale).item())
+        w, h = image.size
+        crop_w = max(1, int(scale * w))
+        crop_h = max(1, int(scale * h))
+        left = int(torch.randint(0, max(1, w - crop_w + 1), (1,)).item())
+        top = int(torch.randint(0, max(1, h - crop_h + 1), (1,)).item())
+        return image.crop((left, top, left + crop_w, top + crop_h))
+
     def __getitem__(self, idx):
         img_path = self.df.loc[idx, "img"]
         image = Image.open(img_path).convert("RGB")
         label = int(self.df.loc[idx, "label"])
 
-        roi_record = self.roi_records.get(canonicalize_image_path(img_path))
-        use_roi = (
-            self.roi_guidance_active
-            and label == self.roi_target_label
-            and roi_record is not None
-            and float(torch.rand(1).item()) <= self.roi_focus_prob
-        )
-        if use_roi:
-            # Randomly select one island if multiple exist
-            selected_roi_record = self._select_roi_record(roi_record)
+        # View 1: Always a random full-context crop (90-100% of image)
+        image1 = self._random_full_image_crop_fixed_scale(image, 0.9, 1.0)
 
-            # Both views get an independently sampled crop scale and jitter so that
-            # the contrastive pair sees the same ROI at different zoom levels.
-            image1 = crop_image_to_roi(
-                image=image,
-                roi_record=selected_roi_record,
-                context_scale=self.roi_context_scale,
-                min_crop_scale=self._sample_crop_scale(),
-                jitter_xy=self._sample_jitter(),
-                max_aspect_ratio=self.roi_max_aspect_ratio,
-            )
-            image2 = crop_image_to_roi(
-                image=image,
-                roi_record=selected_roi_record,
-                context_scale=self.roi_context_scale,
-                min_crop_scale=self._sample_crop_scale(),
-                jitter_xy=self._sample_jitter(),
-                max_aspect_ratio=self.roi_max_aspect_ratio,
-            )
-            return self.transform1(image1), self.roi_transform2(image2), label
+        # Check if we're in warmup period (no crops for first N epochs)
+        in_warmup = self.current_epoch < self.roi_warmup_epochs
 
-        # No ROI: both views get a random crop at the same scale range so the model
-        # cannot distinguish class from crop size.
-        return self.transform1(self._random_full_image_crop(image)), self.transform2(self._random_full_image_crop(image)), label
+        # View 2: ROI crop (if available and not in warmup) or random full-context crop
+        canonical_path = canonicalize_image_path(img_path)
+
+        # For positives: use positive ROI records
+        if label == self.roi_target_label:
+            roi_record = self.roi_records.get(canonical_path)
+            use_roi = (
+                not in_warmup
+                and self.roi_guidance_active
+                and roi_record is not None
+                and float(torch.rand(1).item()) <= self.roi_focus_prob
+            )
+            if use_roi:
+                selected_roi_record = self._select_roi_record(roi_record)
+                jitter_xy = self._sample_jitter()
+                roi_scale = float(torch.empty(1).uniform_(self.roi_min_crop_scale, 1.0).item())
+                image2 = crop_image_to_roi(
+                    image=image,
+                    roi_record=selected_roi_record,
+                    context_scale=self.roi_context_scale,
+                    min_crop_scale=roi_scale,
+                    jitter_xy=jitter_xy,
+                    max_aspect_ratio=self.roi_max_aspect_ratio,
+                )
+                return self.transform1(image1), self.roi_transform2(image2), label
+
+        # For negatives: use negative ROI records (hard negatives) if available
+        else:  # label != self.roi_target_label (i.e., negative)
+            neg_roi_record = self.negative_roi_records.get(canonical_path)
+            use_neg_roi = (
+                not in_warmup
+                and self.negative_roi_guidance_active
+                and neg_roi_record is not None
+                and float(torch.rand(1).item()) <= self.roi_negative_focus_prob
+            )
+            if use_neg_roi:
+                selected_roi_record = self._select_roi_record(neg_roi_record)
+                jitter_xy = self._sample_jitter()
+                roi_scale = float(torch.empty(1).uniform_(self.roi_min_crop_scale, 1.0).item())
+                image2 = crop_image_to_roi(
+                    image=image,
+                    roi_record=selected_roi_record,
+                    context_scale=self.roi_context_scale,
+                    min_crop_scale=roi_scale,
+                    jitter_xy=jitter_xy,
+                    max_aspect_ratio=self.roi_max_aspect_ratio,
+                )
+                return self.transform1(image1), self.roi_transform2(image2), label
+
+        # Fallback: random full-context crop for View 2
+        image2 = self._random_full_image_crop_fixed_scale(image, 0.9, 1.0)
+        return self.transform1(image1), self.transform2(image2), label
 
 
 class SupproROIDataset(Dataset):
@@ -462,27 +578,68 @@ def build_eval_transform(input_size):
     ])
 
 
-def build_roi_focus_transform(input_size):
+def build_roi_focus_transform(input_size, augmentation_intensity=3):
+    """
+    Build ROI-focus training transform with configurable augmentation intensity.
+
+    Args:
+        input_size: Target image size
+        augmentation_intensity: 1 (low), 2 (medium), 3 (strong)
+    """
+    if augmentation_intensity not in AUGMENTATION_PRESETS:
+        raise ValueError(
+            f"augmentation_intensity must be in {list(AUGMENTATION_PRESETS.keys())}, "
+            f"got {augmentation_intensity}"
+        )
+
+    config = AUGMENTATION_PRESETS[augmentation_intensity]
+
     return Compose([
         ToImage(),
         Resize((input_size, input_size)),
-        RandomHorizontalFlip(p=0.5),
-        RandomVerticalFlip(p=0.2),
-        RandomRotation(degrees=10),
-        ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.02),
+        RandomHorizontalFlip(p=config["h_flip_p"]),
+        RandomVerticalFlip(p=config["v_flip_p"]),
+        RandomRotation(degrees=config["rotation_deg"]),
+        ColorJitter(
+            brightness=config["color_brightness"],
+            contrast=config["color_contrast"],
+            saturation=config["color_saturation"],
+            hue=config["color_hue"]
+        ),
         ToDtype(torch.float32, scale=True),
         Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
 
 
-def build_suppro_roi_train_transform(input_size):
+def build_suppro_roi_train_transform(input_size, augmentation_intensity=3):
+    """
+    Build SupPro ROI training transform with configurable augmentation intensity.
+    Uses lighter augmentation than full-frame training.
+
+    Args:
+        input_size: Target image size
+        augmentation_intensity: 1 (low), 2 (medium), 3 (strong)
+    """
+    if augmentation_intensity not in AUGMENTATION_PRESETS:
+        raise ValueError(
+            f"augmentation_intensity must be in {list(AUGMENTATION_PRESETS.keys())}, "
+            f"got {augmentation_intensity}"
+        )
+
+    config = AUGMENTATION_PRESETS[augmentation_intensity]
+
     return Compose([
         ToImage(),
         Resize((input_size, input_size)),
-        RandomHorizontalFlip(p=0.5),
-        RandomVerticalFlip(p=0.2),
-        RandomRotation(degrees=5),
-        ColorJitter(brightness=0.03, contrast=0.03, saturation=0.03, hue=0.005),
+        RandomHorizontalFlip(p=config["h_flip_p"]),
+        RandomVerticalFlip(p=config["v_flip_p"]),
+        RandomRotation(degrees=config["roi_rotation_deg"]),
+        ColorJitter(
+            brightness=config["roi_color_brightness"],
+            contrast=config["roi_color_contrast"],
+            saturation=config["roi_color_saturation"],
+            hue=config["roi_color_hue"]
+        ),
         ToDtype(torch.float32, scale=True),
         Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
@@ -552,16 +709,18 @@ def prepare_datasets(args, device):
     num_folds = int(getattr(args, "num_folds", 1))
     fold_index = int(getattr(args, "fold_index", 0))
     seed = int(getattr(args, "seed", 42))
+    augmentation_intensity = int(getattr(args, "augmentation_intensity", 3))
     train_generator = build_seeded_generator(seed)
     valid_generator = build_seeded_generator(seed + 1)
     print(f"Using input size: {input_size}x{input_size}")
+    print(f"Using augmentation intensity: {augmentation_intensity} ({AUGMENTATION_PRESETS[augmentation_intensity]['name']})")
 
     # View 1: full-frame light augmentation (no random crop — preserve full context).
-    train_transform_1 = build_roi_focus_transform(input_size)
+    train_transform_1 = build_roi_focus_transform(input_size, augmentation_intensity=augmentation_intensity)
     # View 2 fallback (ndbe, or neo without a record): same full-frame light aug.
-    train_transform_2 = build_roi_focus_transform(input_size)
+    train_transform_2 = build_roi_focus_transform(input_size, augmentation_intensity=augmentation_intensity)
     # View 2 when an ROI record exists for a neo sample: crop to ROI then light aug.
-    train_roi_transform_2 = build_roi_focus_transform(input_size)
+    train_roi_transform_2 = build_roi_focus_transform(input_size, augmentation_intensity=augmentation_intensity)
     valid_transform = build_eval_transform(input_size)
 
     df, class_names = build_dataset_dataframe(data_dir)
@@ -605,11 +764,13 @@ def prepare_datasets(args, device):
         roi_transform2=train_roi_transform_2,
         roi_target_label=getattr(args, "gradcam_target_class", 1),
         roi_focus_prob=getattr(args, "roi_focus_prob", 1.0),
+        roi_negative_focus_prob=getattr(args, "roi_negative_focus_prob", 0.0),
         roi_context_scale=getattr(args, "roi_context_scale", 2.0),
         roi_min_crop_scale=getattr(args, "roi_min_crop_scale", 0.6),
         roi_max_crop_scale=getattr(args, "roi_max_crop_scale", 1.0),
         roi_center_jitter=getattr(args, "roi_center_jitter", 0.05),
         roi_max_aspect_ratio=getattr(args, "roi_max_aspect_ratio", 1.5),
+        roi_warmup_epochs=getattr(args, "roi_warmup_epochs", 0),
     )
     valid_ds = SimpleDataset(val_df, valid_transform)
 
