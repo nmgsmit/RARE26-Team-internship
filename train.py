@@ -1103,7 +1103,7 @@ def configure_stage(model, args):
             weight_decay=1e-4
         )
 
-        scheduler = None
+        scheduler = build_finetune_scheduler(optimizer, args.epochs)
 
         return optimizer, scheduler
 

@@ -677,9 +677,15 @@ def _build_classifier_head(
         raise ValueError(f"head_dropout must be in [0, 1), got {head_dropout}.")
 
     if head_type == "linear":
-        return nn.Linear(in_features, n_classes), "linear probe", None
+        head = nn.Linear(in_features, n_classes)
+        nn.init.zeros_(head.weight)
+        nn.init.zeros_(head.bias)
+        return head, "linear probe", None
     if head_type == "ln_linear":
-        return LayerNormLinearHead(in_features, n_classes), "LayerNorm + Linear", None
+        head = LayerNormLinearHead(in_features, n_classes)
+        nn.init.zeros_(head.classifier.weight)
+        nn.init.zeros_(head.classifier.bias)
+        return head, "LayerNorm + Linear", None
     if head_type == "mlp_fullwidth":
         head, resolved_hidden_dim = _build_fullwidth_mlp_head(
             in_features,
