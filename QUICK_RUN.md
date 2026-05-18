@@ -3,15 +3,15 @@
 ## Standard Run Template (Copy & Paste)
 
 ```bash
-export EXPERIMENT_ID="experiment_name"
-export AUGMENTATION_INTENSITY=1
-export ROI_FOCUS_PROB=1.0
-export ROI_NEGATIVE_FOCUS_PROB=0.0
-export ROI_WARMUP_EPOCHS=0
-export ROI_MIN_CROP_SCALE=0.4
-export STAGES_CSV="pretrain,finetune"
-export WANDB_GROUP="group_name"
-export HEAD_TYPE='linear'
+export EXPERIMENT_ID="experiment_name",\
+export AUGMENTATION_INTENSITY=1,\
+export ROI_FOCUS_PROB=1.0,\
+export ROI_NEGATIVE_FOCUS_PROB=0.0,\
+export ROI_WARMUP_EPOCHS=0,\
+export ROI_MIN_CROP_SCALE=0.4,\
+export STAGES_CSV="pretrain,finetune",\
+export WANDB_GROUP="group_name",\
+export HEAD_TYPE='linear' \
 sbatch jobscript_slurm.sh
 ```
 
