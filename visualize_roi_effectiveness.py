@@ -291,7 +291,7 @@ def main():
     # Load dataset
     df, _ = build_dataset_dataframe(DEFAULT_DATA_DIR)
 
-    # Filter by label
+    # Filter by label from dataset
     df_filtered = df[df["label"] == args.label].reset_index(drop=True)
 
     if len(df_filtered) == 0:
@@ -301,20 +301,33 @@ def main():
     # Load ROI records (both positive and negative are in the same file)
     roi_records = {}
     roi_json_path = args.roi_json
+    label_name = "POSITIVE" if args.label == 1 else "NEGATIVE"
 
     if Path(roi_json_path).exists():
         all_roi_records, _ = load_roi_records_from_json(roi_json_path)
 
         # Filter by label based on path: neo = positive (1), ndbe = negative (0)
+        path_filter = ("\\neo\\" if args.label == 1 else "\\ndbe\\", "/neo/" if args.label == 1 else "/ndbe/")
+
         for image_path, record in all_roi_records.items():
-            if args.label == 1 and ("\\neo\\" in image_path or "/neo/" in image_path):
-                roi_records[image_path] = record
-            elif args.label == 0 and ("\\ndbe\\" in image_path or "/ndbe/" in image_path):
+            if path_filter[0] in image_path or path_filter[1] in image_path:
                 roi_records[image_path] = record
 
-        print(f"Loaded {len(roi_records)} ROI records for {'POSITIVE' if args.label == 1 else 'NEGATIVE'} samples from {roi_json_path}")
+        print(f"Loaded {len(roi_records)} ROI records for {label_name} samples from {roi_json_path}")
+
+        # Filter df to only include samples that exist in the filtered ROI records
+        # (This ensures the paths match what's in the JSON)
+        canonical_paths_in_roi = set(roi_records.keys())
+        df_filtered["canonical_img"] = df_filtered["img"].astype(str).map(canonicalize_image_path)
+        df_filtered = df_filtered[df_filtered["canonical_img"].isin(canonical_paths_in_roi)].reset_index(drop=True)
+
+        if len(df_filtered) == 0:
+            print(f"No {label_name} samples found with ROI records in {roi_json_path}")
+            return
+
+        print(f"Found {len(df_filtered)} {label_name} samples with ROI guidance available")
     else:
-        print(f"ROI JSON not found at {roi_json_path}, will show samples without ROI guidance")
+        print(f"ROI JSON not found at {roi_json_path}, will show all {label_name} samples without ROI guidance")
 
     # Create output directory
     output_dir = Path(args.output_dir)
@@ -324,7 +337,6 @@ def main():
     num_to_viz = min(args.num_samples, len(df_filtered))
     indices = random.sample(range(len(df_filtered)), num_to_viz)
 
-    label_name = "POSITIVE" if args.label == 1 else "NEGATIVE"
     print(f"\nVisualizing {num_to_viz} {label_name} samples...")
 
     for i, idx in enumerate(indices):
