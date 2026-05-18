@@ -38,6 +38,7 @@ from roi_guidance import (
     crop_image_to_roi,
     compute_crop_window_from_roi,
     load_roi_records_from_json,
+    DEFAULT_ROI_MAX_ASPECT_RATIO,
 )
 
 
@@ -144,21 +145,20 @@ def visualize_sample(img_path, label, roi_record, output_path, seed=None):
 
     # View 2a: ROI crop (if available)
     view2a_rect = None
-    if roi_record:
+    if roi_record and "bbox" in roi_record:
         view2a_scale = sample_roi_crop_scale(0.4, 0.8)
         jitter_xy = sample_jitter(0.05)
         try:
-            # Get the crop window from roi_guidance
-            roi_crop_img = crop_image_to_roi(
-                image=img,
+            # Get the crop window using compute_crop_window_from_roi
+            left, top, right, bottom = compute_crop_window_from_roi(
+                image_size=(w, h),
                 roi_record=roi_record,
                 context_scale=2.0,
                 min_crop_scale=view2a_scale,
                 jitter_xy=jitter_xy,
-                max_aspect_ratio=1.5,
+                max_aspect_ratio=DEFAULT_ROI_MAX_ASPECT_RATIO,
             )
-            # Estimate the crop window (approximate)
-            view2a_rect = (0, 0, roi_crop_img.width, roi_crop_img.height)
+            view2a_rect = (left, top, right, bottom)
         except:
             view2a_rect = None
 
@@ -181,16 +181,27 @@ def visualize_sample(img_path, label, roi_record, output_path, seed=None):
     ax.set_title("Original + ROI BBox")
 
     if roi_record:
-        # Draw ROI bbox
-        roi_bbox = roi_record.get("roi_bbox", {})
-        x0, y0, x1, y1 = roi_bbox.get("x0"), roi_bbox.get("y0"), roi_bbox.get("x1"), roi_bbox.get("y1")
-        if all(v is not None for v in [x0, y0, x1, y1]):
+        # Draw Grad-CAM ROI bbox (normalized coordinates from JSON)
+        bbox_norm = roi_record.get("bbox")  # [x0_norm, y0_norm, x1_norm, y1_norm]
+
+        if bbox_norm and len(bbox_norm) == 4:
+            # Convert normalized coordinates to pixel coordinates
+            x0_norm, y0_norm, x1_norm, y1_norm = bbox_norm
+            x0_px = int(x0_norm * w)
+            y0_px = int(y0_norm * h)
+            x1_px = int(x1_norm * w)
+            y1_px = int(y1_norm * h)
+
             rect = patches.Rectangle(
-                (x0, y0), x1 - x0, y1 - y0,
+                (x0_px, y0_px), x1_px - x0_px, y1_px - y0_px,
                 linewidth=2, edgecolor=ROI_BOX_COLOR, facecolor='none', linestyle='-'
             )
             ax.add_patch(rect)
-            ax.text(x0, y0 - 10, "ROI BBox", color=ROI_BOX_COLOR, fontsize=10)
+            ax.text(x0_px, max(0, y0_px - 10), "Grad-CAM ROI", color=ROI_BOX_COLOR, fontsize=10,
+                   bbox=dict(boxstyle='round', facecolor='black', alpha=0.5))
+        else:
+            ax.text(10, 30, "No ROI bbox in record", color='white', fontsize=10,
+                    bbox=dict(boxstyle='round', facecolor='black', alpha=0.7))
     else:
         ax.text(10, 30, "No ROI available", color='white', fontsize=12,
                 bbox=dict(boxstyle='round', facecolor='black', alpha=0.7))
