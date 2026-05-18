@@ -599,16 +599,34 @@ def activate_saved_train_roi_guidance(args, train_ds):
     train_image_paths = set(
         train_ds.df["img"].astype(str).map(canonicalize_image_path).tolist()
     )
-    matched_records = {
-        image_path: record for image_path, record in roi_records.items() if image_path in train_image_paths
-    }
-    unmatched_record_count = len(roi_records) - len(matched_records)
-    train_ds.set_roi_records(matched_records, active=True)
+
+    # Separate positive (neo) and negative (ndbe) ROI records
+    positive_records = {}
+    negative_records = {}
+
+    for image_path, record in roi_records.items():
+        if image_path in train_image_paths:
+            # Check if path contains \neo\ or /neo/ (positive) or \ndbe\ or /ndbe/ (negative)
+            if "\\neo\\" in image_path or "/neo/" in image_path:
+                positive_records[image_path] = record
+            elif "\\ndbe\\" in image_path or "/ndbe/" in image_path:
+                negative_records[image_path] = record
+
+    unmatched_record_count = len(roi_records) - len(positive_records) - len(negative_records)
+
+    # Load positive ROI records
+    train_ds.set_roi_records(positive_records, active=True)
+
+    # Load negative ROI records (for View 2 sampling on negative samples)
+    if negative_records:
+        train_ds.set_negative_roi_records(negative_records, active=True)
+
     dataset_stats = train_ds.get_roi_guidance_stats()
 
     payload = {
         "train/roi_records_loaded_total": len(roi_records),
-        "train/roi_records_loaded_matched": len(matched_records),
+        "train/roi_records_loaded_positive": len(positive_records),
+        "train/roi_records_loaded_negative": len(negative_records),
         "train/roi_records_loaded_unmatched": unmatched_record_count,
         "train/roi_positive_images": dataset_stats["roi_positive_images"],
         "train/roi_positive_candidates": dataset_stats["roi_positive_candidates"],
@@ -621,15 +639,15 @@ def activate_saved_train_roi_guidance(args, train_ds):
     print(
         "Loaded saved ROI guidance | "
         f"path={args.roi_records_path} | "
-        f"matched={len(matched_records)}/{len(roi_records)} | "
-        f"unmatched={unmatched_record_count} | "
+        f"positive={len(positive_records)}, negative={len(negative_records)}, unmatched={unmatched_record_count} | "
         f"roi positives={dataset_stats['roi_positive_images']}/{dataset_stats['roi_positive_candidates']} | "
         f"sources={_format_roi_source_counts(dataset_stats['roi_source_counts'])} | "
         f"checkpoint={metadata_checkpoint}"
     )
     return {
         "records_total": len(roi_records),
-        "matched_records": len(matched_records),
+        "positive_records": len(positive_records),
+        "negative_records": len(negative_records),
         "unmatched_records": unmatched_record_count,
         "dataset_stats": dataset_stats,
         "metadata": metadata,
@@ -647,13 +665,27 @@ def refresh_train_roi_guidance(args, model, train_ds, device, epoch_index):
         train_ds,
         device,
     )
-    train_ds.set_roi_records(gradcam_records, active=True)
+    # Separate positive (neo) and negative (ndbe) Grad-CAM records
+    positive_gradcam_records = {}
+    negative_gradcam_records = {}
+
+    for image_path, record in gradcam_records.items():
+        if "\\neo\\" in image_path or "/neo/" in image_path:
+            positive_gradcam_records[image_path] = record
+        elif "\\ndbe\\" in image_path or "/ndbe/" in image_path:
+            negative_gradcam_records[image_path] = record
+
+    train_ds.set_roi_records(positive_gradcam_records, active=True)
+    if negative_gradcam_records:
+        train_ds.set_negative_roi_records(negative_gradcam_records, active=True)
+
     dataset_stats = train_ds.get_roi_guidance_stats()
 
     payload = {
         "train/roi_epoch_activated": epoch_index + 1,
         "train/roi_records_total": len(gradcam_records),
-        "train/roi_records_gradcam": len(gradcam_records),
+        "train/roi_records_positive_gradcam": len(positive_gradcam_records),
+        "train/roi_records_negative_gradcam": len(negative_gradcam_records),
         "train/roi_gradcam_candidates": gradcam_candidates,
         "train/roi_positive_images": dataset_stats["roi_positive_images"],
         "train/roi_positive_candidates": dataset_stats["roi_positive_candidates"],
@@ -665,6 +697,7 @@ def refresh_train_roi_guidance(args, model, train_ds, device, epoch_index):
     print(
         "Activated ROI-guided training | "
         f"epoch={epoch_index + 1} | "
+        f"positive={len(positive_gradcam_records)}, negative={len(negative_gradcam_records)} | "
         f"roi positives={dataset_stats['roi_positive_images']}/{dataset_stats['roi_positive_candidates']} | "
         f"sources={_format_roi_source_counts(dataset_stats['roi_source_counts'])} | "
         f"gradcam accepted={len(gradcam_records)}/{gradcam_candidates}"

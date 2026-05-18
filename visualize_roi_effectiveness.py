@@ -42,7 +42,7 @@ from roi_guidance import (
 
 
 DEFAULT_ROI_JSON = "./checkpoints/roi_records/rois.json"
-DEFAULT_HARD_NEG_ROI_JSON = "./checkpoints/roi_records/hard_neg_rois.json"
+# For negatives, use the same file but filter by path containing \ndbe\ or /ndbe/
 DEFAULT_OUTPUT_DIR = "outputs/roi_effectiveness"
 
 ROI_BOX_COLOR = "#ffdd00"  # Yellow for ROI bbox
@@ -265,13 +265,7 @@ def main():
         "--roi-json",
         type=str,
         default=DEFAULT_ROI_JSON,
-        help="Path to ROI JSON file (for positive samples)"
-    )
-    parser.add_argument(
-        "--hard-neg-roi-json",
-        type=str,
-        default=DEFAULT_HARD_NEG_ROI_JSON,
-        help="Path to hard-negative ROI JSON file (for negative samples)"
+        help="Path to ROI JSON file (contains both positive [neo] and negative [ndbe] ROI records)"
     )
     parser.add_argument(
         "--output-dir",
@@ -304,13 +298,21 @@ def main():
         print(f"No samples found with label {args.label}")
         return
 
-    # Load ROI records
+    # Load ROI records (both positive and negative are in the same file)
     roi_records = {}
-    roi_json_path = args.hard_neg_roi_json if args.label == 0 else args.roi_json
+    roi_json_path = args.roi_json
 
     if Path(roi_json_path).exists():
-        roi_records = load_roi_records_from_json(roi_json_path)
-        print(f"Loaded {len(roi_records)} ROI records from {roi_json_path}")
+        all_roi_records, _ = load_roi_records_from_json(roi_json_path)
+
+        # Filter by label based on path: neo = positive (1), ndbe = negative (0)
+        for image_path, record in all_roi_records.items():
+            if args.label == 1 and ("\\neo\\" in image_path or "/neo/" in image_path):
+                roi_records[image_path] = record
+            elif args.label == 0 and ("\\ndbe\\" in image_path or "/ndbe/" in image_path):
+                roi_records[image_path] = record
+
+        print(f"Loaded {len(roi_records)} ROI records for {'POSITIVE' if args.label == 1 else 'NEGATIVE'} samples from {roi_json_path}")
     else:
         print(f"ROI JSON not found at {roi_json_path}, will show samples without ROI guidance")
 
