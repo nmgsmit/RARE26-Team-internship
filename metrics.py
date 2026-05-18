@@ -274,7 +274,7 @@ def log_metrics(
     test_projected_metrics,
     extra_payload=None,
 ):
-    learning_rate = optimizer.param_groups[0]["lr"]
+    learning_rate = optimizer.param_groups[0]["lr"] if optimizer is not None else 0.0
     # Keep these keys stable if you want W&B dashboards from main and test-model to stay directly comparable.
     payload = OrderedDict([
         ("epoch", epoch + 1),

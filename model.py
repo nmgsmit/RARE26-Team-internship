@@ -1,11 +1,19 @@
 import math
 from pathlib import Path
 
+import numpy as np
 import timm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from timm.layers import resample_abs_pos_embed
+
+try:
+    from sklearn.neighbors import KNeighborsClassifier
+    from sklearn.svm import SVC
+    _SKLEARN_AVAILABLE = True
+except ImportError:
+    _SKLEARN_AVAILABLE = False
 
 
 def _unwrap_checkpoint_state_dict(checkpoint):
@@ -551,6 +559,75 @@ class CosineLinearHead(nn.Module):
         return scale * normalized_features @ normalized_weight.t()
 
 
+class SklearnKNNHead(nn.Module):
+    """k-Nearest-Neighbours classifier wrapped as an nn.Module.
+
+    forward() returns log-probabilities so that torch.softmax() and
+    torch.argmax() behave consistently with the rest of the training loop.
+    Call fit(X_numpy, y_numpy) once before using forward().
+    """
+
+    def __init__(self, n_neighbors=5, n_classes=2):
+        super().__init__()
+        if not _SKLEARN_AVAILABLE:
+            raise ImportError(
+                "scikit-learn is required for the KNN head.  "
+                "Install it with:  pip install scikit-learn"
+            )
+        self.n_neighbors = n_neighbors
+        self.n_classes = n_classes
+        self._clf = KNeighborsClassifier(n_neighbors=n_neighbors)
+        self._fitted = False
+        # Placeholder so state_dict() / module.parameters() work normally.
+        self._dummy = nn.Parameter(torch.zeros(1), requires_grad=False)
+
+    def fit(self, X, y):
+        self._clf.fit(X, y)
+        self._fitted = True
+
+    def forward(self, features):
+        if not self._fitted:
+            raise RuntimeError("KNN head has not been fitted yet. Call fit() first.")
+        X = features.detach().cpu().numpy()
+        proba = self._clf.predict_proba(X).astype(np.float32)
+        # softmax(log(p)) == p when p sums to 1, so all downstream code works unchanged.
+        log_proba = np.log(np.clip(proba, 1e-8, 1.0))
+        return torch.from_numpy(log_proba).to(device=features.device)
+
+
+class SklearnSVMHead(nn.Module):
+    """SVM classifier (RBF kernel, C=margin) wrapped as an nn.Module.
+
+    forward() returns log-probabilities (Platt-scaled via probability=True).
+    Call fit(X_numpy, y_numpy) once before using forward().
+    """
+
+    def __init__(self, C=2.0, n_classes=2):
+        super().__init__()
+        if not _SKLEARN_AVAILABLE:
+            raise ImportError(
+                "scikit-learn is required for the SVM head.  "
+                "Install it with:  pip install scikit-learn"
+            )
+        self.C = C
+        self.n_classes = n_classes
+        self._clf = SVC(C=C, kernel="rbf", probability=True)
+        self._fitted = False
+        self._dummy = nn.Parameter(torch.zeros(1), requires_grad=False)
+
+    def fit(self, X, y):
+        self._clf.fit(X, y)
+        self._fitted = True
+
+    def forward(self, features):
+        if not self._fitted:
+            raise RuntimeError("SVM head has not been fitted yet. Call fit() first.")
+        X = features.detach().cpu().numpy()
+        proba = self._clf.predict_proba(X).astype(np.float32)
+        log_proba = np.log(np.clip(proba, 1e-8, 1.0))
+        return torch.from_numpy(log_proba).to(device=features.device)
+
+
 def _build_fullwidth_mlp_head(
     in_features,
     n_classes,
@@ -591,6 +668,8 @@ def _build_classifier_head(
     mlp_hidden_layers=1,
     mlp_hidden_dim=None,
     mlp_dropout=0.0,
+    knn_neighbors=5,
+    svm_C=2.0,
 ):
     if head_hidden_dim is not None and head_hidden_dim <= 0:
         raise ValueError(f"head_hidden_dim must be > 0, got {head_hidden_dim}.")
@@ -627,6 +706,14 @@ def _build_classifier_head(
         return head, f"residual bottleneck MLP ({hidden_dim}, dropout={head_dropout})", hidden_dim
     if head_type == "cosine_linear":
         return CosineLinearHead(in_features, n_classes), "cosine linear head", None
+    if head_type == "knn":
+        k = int(knn_neighbors)
+        head = SklearnKNNHead(n_neighbors=k, n_classes=n_classes)
+        return head, f"KNN (k={k})", None
+    if head_type == "svm":
+        c = float(svm_C)
+        head = SklearnSVMHead(C=c, n_classes=n_classes)
+        return head, f"SVM RBF (C={c})", None
 
     raise ValueError(f"Unsupported head_type '{head_type}'.")
 
@@ -649,6 +736,8 @@ class Model(nn.Module):
         mlp_hidden_layers=1,
         mlp_hidden_dim=None,
         mlp_dropout=0.0,
+        knn_neighbors=5,
+        svm_C=2.0,
         **kwargs,
     ):
         super().__init__()
@@ -711,6 +800,8 @@ class Model(nn.Module):
             mlp_hidden_layers=mlp_hidden_layers,
             mlp_hidden_dim=mlp_hidden_dim,
             mlp_dropout=mlp_dropout,
+            knn_neighbors=knn_neighbors,
+            svm_C=svm_C,
         )
         self.classifier_hidden_dim = resolved_hidden_dim
         self.classifier_description = (
@@ -720,6 +811,10 @@ class Model(nn.Module):
     @property
     def cls_head(self):
         return self.head
+
+    @property
+    def is_sklearn_head(self):
+        return isinstance(self.head, (SklearnKNNHead, SklearnSVMHead))
 
     def forward_tokens(self, x):
         return self.backbone.forward_features(x)

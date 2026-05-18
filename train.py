@@ -88,6 +88,8 @@ HEAD_TYPE_CHOICES = (
     "mlp_bottleneck",
     "residual_bottleneck",
     "cosine_linear",
+    "knn",
+    "svm",
 )
 
 
@@ -236,6 +238,18 @@ def get_args_parser():
         type=float,
         default=0.0,
         help="Dropout applied after each hidden layer in the full-width MLP head.",
+    )
+    parser.add_argument(
+        "--knn-neighbors",
+        type=int,
+        default=5,
+        help="Number of neighbours for the KNN head (--head-type knn).",
+    )
+    parser.add_argument(
+        "--svm-C",
+        type=float,
+        default=2.0,
+        help="Regularisation parameter C (controls margin) for the SVM head (--head-type svm). Default 2.0.",
     )
     parser.add_argument(
         "--backbone-preset",
@@ -1043,6 +1057,11 @@ def configure_stage(model, args):
             parameter.requires_grad = False
         for parameter in model.proj_head.parameters():
             parameter.requires_grad = False
+
+        if model.is_sklearn_head:
+            # sklearn heads are fitted once on extracted features; no gradient optimiser needed.
+            return None, None
+
         for parameter in model.cls_head.parameters():
             parameter.requires_grad = True
 
@@ -1052,12 +1071,33 @@ def configure_stage(model, args):
             momentum=0.9,
             weight_decay=1e-4
         )
-        
+
         scheduler = None
-        
+
         return optimizer, scheduler
 
     raise ValueError(f"Unknown stage: {args.stage}")
+
+
+def _fit_sklearn_head(model, train_loader, device):
+    """Extract classifier features from the frozen backbone and fit the sklearn head."""
+    model.eval()
+    all_features = []
+    all_labels = []
+    with torch.no_grad():
+        for batch in train_loader:
+            images1, _images2, labels = batch
+            images1 = images1.to(device)
+            pooled = model.encode(images1)
+            features = model.classifier_features_from_pooled(pooled)
+            all_features.append(features.cpu().numpy())
+            all_labels.append(labels.numpy())
+    X = np.concatenate(all_features, axis=0)
+    y = np.concatenate(all_labels, axis=0)
+    print(f"Fitting {type(model.cls_head).__name__} on {len(y)} training samples "
+          f"({int((y == 1).sum())} positive, {int((y == 0).sum())} negative) …")
+    model.cls_head.fit(X, y)
+    print(f"Fitting done.")
 
 
 def main(args):
@@ -1169,6 +1209,8 @@ def main(args):
         mlp_hidden_layers=args.mlp_hidden_layers,
         mlp_hidden_dim=args.mlp_hidden_dim,
         mlp_dropout=args.mlp_dropout,
+        knn_neighbors=args.knn_neighbors,
+        svm_C=args.svm_C,
     ).to(device)
 
     if args.backbone_weights_path:
@@ -1191,6 +1233,8 @@ def main(args):
         "mlp_hidden_layers": args.mlp_hidden_layers,
         "mlp_hidden_dim": args.mlp_hidden_dim,
         "mlp_dropout": args.mlp_dropout,
+        "knn_neighbors": args.knn_neighbors,
+        "svm_C": args.svm_C,
     }
 
     criterion = None
@@ -1198,6 +1242,10 @@ def main(args):
         criterion = build_supervised_criterion(args.loss_name, train_ds, len(class_names), device)
 
     optimizer, scheduler = configure_stage(model, args)
+
+    if model.is_sklearn_head:
+        _fit_sklearn_head(model, train_loader, device)
+
     projected_prevalence = 0.01
     best_valid_projected_ppv = float("-inf")
     best_valid_fpr = float("inf")
@@ -1213,7 +1261,6 @@ def main(args):
             refresh_train_roi_guidance(args, model, train_ds, device, epoch)
             roi_refresh_state["completed"] = True
 
-        model.train()
         train_loss = 0.0
         train_ce = 0.0
         train_supmin = 0.0
@@ -1222,7 +1269,20 @@ def main(args):
         train_correct = 0
         train_total = 0
 
-        for batch in train_loader:
+        if model.is_sklearn_head:
+            # Sklearn heads are fitted once before the loop; here we just measure train accuracy.
+            model.eval()
+            with torch.no_grad():
+                for batch in train_loader:
+                    images1, _images2, labels = batch
+                    images1, labels = images1.to(device), labels.to(device).long()
+                    preds = torch.argmax(model(images1), dim=1)
+                    train_correct += (preds == labels).sum().item()
+                    train_total += labels.size(0)
+        else:
+            model.train()
+
+        for batch in train_loader if not model.is_sklearn_head else []:
             images1, images2, labels = batch
             images1 = images1.to(device)
             images2 = images2.to(device)
