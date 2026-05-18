@@ -25,6 +25,7 @@ FINETUNE_LOSS="${FINETUNE_LOSS:-class-balanced}"
 HEAD_TYPE="${HEAD_TYPE:-linear}"
 LAMBDA_SUPMIN="${LAMBDA_SUPMIN:-}"
 LAMBDA_SUPPRO="${LAMBDA_SUPPRO:-}"
+CROP_SCALE="${CROP_SCALE:-0.6}"
 
 # Training and optimization.
 TEMPERATURE="${TEMPERATURE:-0.07}"
@@ -111,6 +112,7 @@ build_common_args() {
         --save-dir "${save_dir}"
         --temperature "${TEMPERATURE}"
         --base-temperature "${BASE_TEMPERATURE}"
+        --crop-scale "${CROP_SCALE}"
     )
 
     if [ "${stage}" = "pretrain" ]; then
