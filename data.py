@@ -303,8 +303,13 @@ class TwoViewDataset(Dataset):
                 )
                 return self.transform1(image1), self.roi_transform2(image2), label
 
-        # Fallback: random full-context crop for View 2
-        image2 = self._random_full_image_crop_fixed_scale(image, 0.9, 1.0)
+        # Fallback: random crop
+        if self.roi_guidance_active:
+            # ROI guidance active but not selected this sample - use same scale range for fair comparison
+            image2 = self._random_full_image_crop_fixed_scale(image, self.roi_min_crop_scale, self.roi_max_crop_scale)
+        else:
+            # ROI guidance inactive - use full-context crop
+            image2 = self._random_full_image_crop_fixed_scale(image, 0.9, 1.0)
         return self.transform1(image1), self.transform2(image2), label
 
 

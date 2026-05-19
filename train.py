@@ -1361,7 +1361,8 @@ def main(args):
         )
         print(f"Saved {type(model.cls_head).__name__} model: {final_save_path}")
 
-        if args.post_train_gradcam:
+        # Skip Grad-CAM for non-differentiable heads (SVM, KNN) since they can't backpropagate
+        if args.post_train_gradcam and args.head_type not in ("svm", "knn"):
             run_post_training_gradcam(
                 args=args,
                 model=model,
@@ -1369,6 +1370,8 @@ def main(args):
                 final_save_path=final_save_path,
                 best_save_path=final_save_path,
             )
+        elif args.post_train_gradcam and args.head_type in ("svm", "knn"):
+            print(f"Skipping post-training Grad-CAM evaluation: {args.head_type.upper()} head is not differentiable.")
 
         print(f"Class mapping: {class_names}")
         print("Training finished! Check your WandB dashboard.")
