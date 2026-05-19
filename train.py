@@ -1292,14 +1292,88 @@ def main(args):
 
     optimizer, scheduler = configure_stage(model, args)
 
-    if model.is_sklearn_head:
-        _fit_sklearn_head(model, train_loader, device)
-
     projected_prevalence = 0.01
     best_valid_auprc = float("-inf")
     best_save_path = os.path.join(args.save_dir, f"{args.experiment_id}_best.pt")
     final_save_path = os.path.join(args.save_dir, f"{args.experiment_id}_final.pt")
     roi_refresh_state = {"completed": False}
+
+    if model.is_sklearn_head:
+        _fit_sklearn_head(model, train_loader, device)
+
+        # Sklearn heads need no epoch loop — evaluate once and log.
+        valid_targets, valid_scores = collect_scores(model, valid_loader, device)
+        valid_metrics = compute_group_eval_metrics(valid_targets, valid_scores)
+        valid_threshold = valid_metrics["Threshold"]
+        valid_projected_metrics = project_operating_metrics_to_prevalence(
+            valid_metrics, prevalence=projected_prevalence
+        )
+
+        test_targets, test_scores = collect_scores(model, testset_loader, device)
+        test_metrics = compute_group_eval_metrics(test_targets, test_scores, threshold=valid_threshold)
+        test_projected_metrics = project_operating_metrics_to_prevalence(
+            test_metrics, prevalence=projected_prevalence
+        )
+
+        print(
+            f"[{type(model.cls_head).__name__}] "
+            f"Val AUPRC: {valid_metrics['AUPRC']:.4f} | Val AUROC: {valid_metrics['AUROC']:.4f} | "
+            f"Val TPR: {valid_metrics['TPR']:.4f} | Val FPR: {valid_metrics['FPR']:.4f} | "
+            f"Val PPV: {valid_metrics['PPV']:.4f} | Val Thr: {valid_threshold:.4f} | "
+            f"1%Val PPV: {valid_projected_metrics['Projected PPV']:.4f} | "
+            f"Test AUPRC: {test_metrics['AUPRC']:.4f} | Test AUROC: {test_metrics['AUROC']:.4f} | "
+            f"Test TPR: {test_metrics['TPR']:.4f} | Test FPR: {test_metrics['FPR']:.4f}"
+        )
+
+        log_metrics(
+            epoch=0,
+            optimizer=None,
+            avg_train_loss=float("nan"),
+            train_accuracy=float("nan"),
+            avg_valid_loss=float("nan"),
+            valid_accuracy=valid_metrics["TPR"],
+            valid_metrics=valid_metrics,
+            test_metrics=test_metrics,
+            val_projected_metrics=valid_projected_metrics,
+            test_projected_metrics=test_projected_metrics,
+            extra_payload={
+                "stage": args.stage,
+                "loss_name": args.loss_name,
+                "head_type": args.head_type,
+            },
+        )
+
+        torch.save(
+            create_model_checkpoint(
+                model,
+                checkpoint_model_config,
+                extra_metadata={
+                    "experiment_id": args.experiment_id,
+                    "epoch": 0,
+                    "num_folds": args.num_folds,
+                    "fold_index": args.fold_index,
+                    "selected_threshold": valid_threshold,
+                    "stage": args.stage,
+                    "loss_name": args.loss_name,
+                },
+            ),
+            final_save_path,
+        )
+        print(f"Saved {type(model.cls_head).__name__} model: {final_save_path}")
+
+        if args.post_train_gradcam:
+            run_post_training_gradcam(
+                args=args,
+                model=model,
+                device=device,
+                final_save_path=final_save_path,
+                best_save_path=final_save_path,
+            )
+
+        print(f"Class mapping: {class_names}")
+        print("Training finished! Check your WandB dashboard.")
+        wandb.finish()
+        return
 
     for epoch in range(args.epochs):
         # Update dataset's current epoch (for ROI warmup control)
@@ -1317,20 +1391,9 @@ def main(args):
         train_correct = 0
         train_total = 0
 
-        if model.is_sklearn_head:
-            # Sklearn heads are fitted once before the loop; here we just measure train accuracy.
-            model.eval()
-            with torch.no_grad():
-                for batch in train_loader:
-                    images1, _images2, labels = batch
-                    images1, labels = images1.to(device), labels.to(device).long()
-                    preds = torch.argmax(model(images1), dim=1)
-                    train_correct += (preds == labels).sum().item()
-                    train_total += labels.size(0)
-        else:
-            model.train()
+        model.train()
 
-        for batch in train_loader if not model.is_sklearn_head else []:
+        for batch in train_loader:
             images1, images2, labels = batch
             images1 = images1.to(device)
             images2 = images2.to(device)
