@@ -42,12 +42,16 @@ DEFAULT_TESTSET_IMAGES_DIR = "../data/EVC_Barretts_FullSet/images"
 DEFAULT_POST_TRAIN_GRADCAM_DATASET_ROOT = "../data/EVC_Barretts_FullSet"
 DEFAULT_POST_TRAIN_GRADCAM_THRESHOLDS = "0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9"
 PRETRAIN_LOSSES = {"supmin", "suppro"}
-SUPERVISED_LOSSES = {"ce", "class-balanced"}
+SUPERVISED_LOSSES = {"ce", "class-balanced", "label-smoothed-ce"}
 LOSS_ALIASES = {
     "balanced": "class-balanced",
     "balanced-ce": "class-balanced",
     "class-balanced-ce": "class-balanced",
     "class_balanced": "class-balanced",
+    "label-smoothing": "label-smoothed-ce",
+    "label-smooth-ce": "label-smoothed-ce",
+    "ls-ce": "label-smoothed-ce",
+    "lsce": "label-smoothed-ce",
 }
 BACKBONE_PRESETS = {
     "dinov3": {
@@ -445,6 +449,12 @@ def get_args_parser():
     parser.add_argument("--post-train-gradcam-log-best-k", type=int, default=10)
     parser.add_argument("--post-train-gradcam-log-worst-k", type=int, default=10)
     parser.add_argument("--post-train-gradcam-log-hard-neg-k", type=int, default=10)
+    parser.add_argument(
+        "--label-smoothing",
+        type=float,
+        default=0.05,
+        help="Label smoothing epsilon for label-smoothed-ce loss (default: 0.05).",
+    )
 
     parser.add_argument(
         "--balanced-sampler",
@@ -719,7 +729,7 @@ def resolve_runtime_config(args):
         args.loss_name = {
             "baseline": "class-balanced",
             "pretrain": "supmin",
-            "finetune": "class-balanced",
+            "finetune": "label-smoothed-ce",
         }[args.stage]
     args.loss_name = canonicalize_loss_name(args.loss_name)
 
@@ -1033,11 +1043,16 @@ def run_post_training_gradcam(args, model, device, final_save_path, best_save_pa
     )
 
 
-def build_supervised_criterion(loss_name, train_ds, n_classes, device):
+def build_supervised_criterion(loss_name, train_ds, n_classes, device, label_smoothing=0.05):
     if loss_name == "ce":
         print("Using standard cross entropy.")
         return nn.CrossEntropyLoss()
 
+    if loss_name == "label-smoothed-ce":
+        print(f"Using label-smoothed cross entropy (label_smoothing={label_smoothing}).")
+        return nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+
+    # class-balanced
     train_labels = torch.tensor(train_ds.df["label"].tolist(), dtype=torch.long)
     class_counts = torch.bincount(train_labels, minlength=n_classes).float()
     if torch.any(class_counts == 0):
@@ -1270,7 +1285,10 @@ def main(args):
 
     criterion = None
     if args.stage != "pretrain":
-        criterion = build_supervised_criterion(args.loss_name, train_ds, len(class_names), device)
+        criterion = build_supervised_criterion(
+            args.loss_name, train_ds, len(class_names), device,
+            label_smoothing=args.label_smoothing,
+        )
 
     optimizer, scheduler = configure_stage(model, args)
 
@@ -1278,8 +1296,7 @@ def main(args):
         _fit_sklearn_head(model, train_loader, device)
 
     projected_prevalence = 0.01
-    best_valid_projected_ppv = float("-inf")
-    best_valid_fpr = float("inf")
+    best_valid_auprc = float("-inf")
     best_save_path = os.path.join(args.save_dir, f"{args.experiment_id}_best.pt")
     final_save_path = os.path.join(args.save_dir, f"{args.experiment_id}_final.pt")
     roi_refresh_state = {"completed": False}
@@ -1515,36 +1532,15 @@ def main(args):
             extra_payload=extra_payload,
         )
 
-        current_valid_projected_ppv = (
-            valid_projected_metrics["Projected PPV"]
-            if np.isfinite(valid_projected_metrics["Projected PPV"])
+        current_valid_auprc = (
+            valid_metrics["AUPRC"]
+            if np.isfinite(valid_metrics["AUPRC"])
             else float("-inf")
         )
-        current_valid_fpr = (
-            valid_projected_metrics["FPR"]
-            if np.isfinite(valid_projected_metrics["FPR"])
-            else float("inf")
-        )
-        same_projected_ppv = (
-            (
-                not np.isfinite(current_valid_projected_ppv)
-                and not np.isfinite(best_valid_projected_ppv)
-                and current_valid_projected_ppv == best_valid_projected_ppv
-            )
-            or (
-                np.isfinite(current_valid_projected_ppv)
-                and np.isfinite(best_valid_projected_ppv)
-                and np.isclose(current_valid_projected_ppv, best_valid_projected_ppv)
-            )
-        )
-        is_better_checkpoint = (
-            current_valid_projected_ppv > best_valid_projected_ppv
-            or (same_projected_ppv and current_valid_fpr < best_valid_fpr)
-        )
+        is_better_checkpoint = current_valid_auprc > best_valid_auprc
 
         if is_better_checkpoint:
-            best_valid_projected_ppv = current_valid_projected_ppv
-            best_valid_fpr = current_valid_fpr
+            best_valid_auprc = current_valid_auprc
             torch.save(
                 create_model_checkpoint(
                     model,
@@ -1563,8 +1559,8 @@ def main(args):
             )
             print(
                 f"   -> Saved new best model to {best_save_path} "
-                f"(1% PPV: {valid_projected_metrics['Projected PPV']:.4f}, "
-                f"FPR: {valid_metrics['FPR']:.4f}, Threshold: {valid_threshold:.4f})"
+                f"(Val AUPRC: {valid_metrics['AUPRC']:.4f}, "
+                f"AUROC: {valid_metrics['AUROC']:.4f}, Threshold: {valid_threshold:.4f})"
             )
 
     if args.stage == "pretrain":
