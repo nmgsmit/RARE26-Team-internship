@@ -1,6 +1,7 @@
 import os
 import random
 from argparse import SUPPRESS, ArgumentParser
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +19,8 @@ from metrics import (
     compute_group_eval_metrics,
     log_metrics,
     project_operating_metrics_to_prevalence,
+    select_highest_threshold_for_target_recall,
+    summarize_fold_metrics,
 )
 from model import (
     Model,
@@ -178,6 +181,15 @@ def get_args_parser():
         type=int,
         default=0,
         help="Zero-based validation fold index when --num-folds > 1.",
+    )
+    parser.add_argument(
+        "--loco",
+        action="store_true",
+        help=(
+            "Leave-one-center-out cross-validation. When set, the script trains one model per "
+            "center (each center used as validation in turn), then ensembles the resulting "
+            "checkpoints on the external test set. Overrides --num-folds / --fold-index splits."
+        ),
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -346,8 +358,8 @@ def get_args_parser():
     parser.add_argument(
         "--roi-focus-prob",
         type=float,
-        default=1.0,
-        help="Probability of replacing the second positive training view with an ROI-focused crop.",
+        default=0.5,
+        help="Per-view probability of using an ROI crop for positive samples. Each view is sampled independently; negatives always use random crops.",
     )
     parser.add_argument(
         "--roi-negative-focus-prob",
@@ -456,13 +468,22 @@ def get_args_parser():
         help="Label smoothing epsilon for label-smoothed-ce loss (default: 0.05).",
     )
 
-    parser.add_argument(
+    balanced_sampler_group = parser.add_mutually_exclusive_group()
+    balanced_sampler_group.add_argument(
         "--balanced-sampler",
         action="store_true",
+        dest="balanced_sampler",
+        default=None,
         help=(
             "Use exactly class-balanced mini-batches during training. "
-            "This is especially useful for SupPro pretraining."
+            "This is especially useful for SupPro pretraining and is auto-enabled when --loco is set."
         ),
+    )
+    balanced_sampler_group.add_argument(
+        "--no-balanced-sampler",
+        action="store_false",
+        dest="balanced_sampler",
+        help="Disable balanced sampling (overrides the LOCO auto-enable).",
     )
     parser.add_argument(
         "--suppro-roi",
@@ -787,6 +808,17 @@ def resolve_runtime_config(args):
         raise ValueError(
             f"--roi-gradcam-min-prob must be in [0, 1], got {args.roi_gradcam_min_prob}."
         )
+    # Resolve tri-state --balanced-sampler default: under LOCO, default-on (heavily
+    # imbalanced per-fold training set otherwise leaves linear head starved of positives).
+    if getattr(args, "balanced_sampler", None) is None:
+        if getattr(args, "loco", False):
+            args.balanced_sampler = True
+            print(
+                "[LOCO] Auto-enabling --balanced-sampler "
+                "(use --no-balanced-sampler to override)."
+            )
+        else:
+            args.balanced_sampler = False
     if args.balanced_sampler and args.batch_size % 2 != 0:
         raise ValueError(
             f"--balanced-sampler requires an even --batch-size, got {args.batch_size}."
@@ -1060,8 +1092,12 @@ def build_supervised_criterion(loss_name, train_ds, n_classes, device, label_smo
 
     class_weights = class_counts.sum() / (n_classes * class_counts)
     class_weights = class_weights.to(device)
-    print(f"Using class-balanced cross entropy with weights: {class_weights.tolist()}")
-    return nn.CrossEntropyLoss(weight=class_weights)
+    smoothing = float(label_smoothing) if label_smoothing else 0.0
+    print(
+        f"Using class-balanced cross entropy with weights: {class_weights.tolist()} | "
+        f"label_smoothing={smoothing}"
+    )
+    return nn.CrossEntropyLoss(weight=class_weights, label_smoothing=smoothing)
 
 
 def configure_stage(model, args):
@@ -1148,6 +1184,12 @@ def _fit_sklearn_head(model, train_loader, device):
 
 def main(args):
     args = resolve_runtime_config(args)
+    if getattr(args, "loco", False):
+        return _run_loco(args)
+    return _run_main_body(args)
+
+
+def _run_main_body(args):
     if args.roi_guided_training and args.stage == "pretrain":
         raise ValueError(
             "--roi-guided-training is only supported for baseline or finetune stages. "
@@ -1674,7 +1716,567 @@ def main(args):
             )
 
     print(f"Class mapping: {class_names}")
+
+    # Re-evaluate the best checkpoint on the validation set so the caller (e.g. LOCO
+    # orchestration) can build threshold + ensemble from the *best* model, not the last
+    # epoch.
+    fold_result = None
+    if args.stage != "pretrain" and not model.is_sklearn_head and os.path.exists(best_save_path):
+        try:
+            load_model_checkpoint(model, best_save_path)
+            best_val_targets, best_val_scores = collect_scores(model, valid_loader, device)
+            best_val_metrics = compute_group_eval_metrics(best_val_targets, best_val_scores)
+            best_val_projected = project_operating_metrics_to_prevalence(
+                best_val_metrics, prevalence=projected_prevalence
+            )
+            predictions_path = os.path.join(
+                args.save_dir, f"{args.experiment_id}_val_predictions.npz"
+            )
+            np.savez(
+                predictions_path,
+                val_targets=np.asarray(best_val_targets, dtype=np.int64),
+                val_scores=np.asarray(best_val_scores, dtype=np.float32),
+                fold_index=int(getattr(args, "fold_index", 0)),
+            )
+            print(
+                f"Saved best-model validation predictions to {predictions_path} | "
+                f"Best Val AUPRC: {best_val_metrics['AUPRC']:.4f} | "
+                f"AUROC: {best_val_metrics['AUROC']:.4f} | "
+                f"Threshold: {best_val_metrics['Threshold']:.4f}"
+            )
+            fold_result = {
+                "fold_index": int(getattr(args, "fold_index", 0)),
+                "experiment_id": args.experiment_id,
+                "best_save_path": best_save_path,
+                "final_save_path": final_save_path,
+                "val_predictions_path": predictions_path,
+                "val_targets": best_val_targets,
+                "val_scores": best_val_scores,
+                "val_metrics": best_val_metrics,
+                "val_projected_metrics": best_val_projected,
+                "checkpoint_model_config": checkpoint_model_config,
+                "class_names": class_names,
+            }
+        except Exception as exc:
+            print(f"Warning: could not re-score best checkpoint for fold result: {exc}")
+
     print("Training finished! Check your WandB dashboard.")
+    wandb.finish()
+    return fold_result
+
+
+def _run_loco(args):
+    """Run leave-one-center-out training over all centers, then ensemble."""
+    import copy as _copy
+
+    # Discover centers from disk so we know how many folds to run.
+    data_dir = args.data_dir
+    centers_sorted = sorted(
+        [
+            folder
+            for folder in os.listdir(data_dir)
+            if folder.startswith("center")
+            and os.path.isdir(os.path.join(data_dir, folder))
+        ]
+    )
+    if len(centers_sorted) < 2:
+        raise ValueError(
+            f"--loco needs at least 2 centers, found {centers_sorted} in {data_dir}."
+        )
+
+    base_experiment_id = args.experiment_id
+    base_save_dir = args.save_dir
+
+    fold_results = []
+    for fold_index, holdout_center in enumerate(centers_sorted):
+        fold_args = _copy.deepcopy(args)
+        fold_args.fold_index = fold_index
+        fold_args.num_folds = len(centers_sorted)
+        fold_args.experiment_id = f"{base_experiment_id}_fold{fold_index}_val_{holdout_center}"
+        fold_args.save_dir = os.path.join(base_save_dir, f"fold{fold_index}_val_{holdout_center}")
+        # Substitute {fold_index} / {holdout_center} placeholders in checkpoint paths
+        # so the same command can point at per-fold encoders produced by a prior LOCO
+        # pretrain. Both placeholders are optional; literal paths pass through unchanged.
+        placeholders = {"fold_index": fold_index, "holdout_center": holdout_center}
+        for attr in ("encoder_ckpt", "init_encoder_ckpt"):
+            value = getattr(fold_args, attr, None)
+            if isinstance(value, str) and ("{fold_index}" in value or "{holdout_center}" in value):
+                resolved = value.format(**placeholders)
+                if not os.path.exists(resolved):
+                    raise FileNotFoundError(
+                        f"--{attr.replace('_', '-')} resolved to {resolved} for fold "
+                        f"{fold_index} ({holdout_center}) but that file does not exist."
+                    )
+                setattr(fold_args, attr, resolved)
+                print(f"[LOCO] Resolved --{attr.replace('_', '-')} -> {resolved}")
+        # Run the inner training without re-entering the LOCO branch.
+        fold_args.loco = True  # keep True so data.py uses the LOCO split
+        print(
+            f"\n=== LOCO fold {fold_index + 1}/{len(centers_sorted)}: "
+            f"val center = {holdout_center} | experiment_id = {fold_args.experiment_id} ===\n"
+        )
+        result = _run_main_body(fold_args)
+        if result is None:
+            if args.stage == "pretrain":
+                print(
+                    f"[LOCO] Fold {fold_index} ({holdout_center}) finished; pretrain stage "
+                    "produces an encoder checkpoint only — no ensemble step."
+                )
+                continue
+            raise RuntimeError(
+                f"LOCO fold {fold_index} produced no fold result. Ensemble cannot be built."
+            )
+        result["holdout_center"] = holdout_center
+        fold_results.append(result)
+
+    if args.stage == "pretrain":
+        print(
+            "[LOCO] All pretrain folds complete. Use the per-fold encoder checkpoints with "
+            "`--stage finetune --loco` (and per-fold --encoder-ckpt) to train classifiers."
+        )
+        return fold_results
+
+    if len(fold_results) < 2:
+        raise RuntimeError(
+            f"LOCO ensembling needs >=2 successful folds, got {len(fold_results)}."
+        )
+
+    _run_ensemble(args, fold_results, centers_sorted)
+    return fold_results
+
+
+def _run_ensemble(args, fold_results, centers_sorted):
+    """Average logits from each LOCO fold's best checkpoint on the external test set."""
+    import torch as _torch
+
+    device = _torch.device("cuda" if _torch.cuda.is_available() else "cpu")
+
+    base_experiment_id = args.experiment_id
+    base_save_dir = args.save_dir
+    os.makedirs(base_save_dir, exist_ok=True)
+
+    ensemble_run = wandb.init(
+        project=args.wandb_project,
+        group=args.wandb_group,
+        name=f"{base_experiment_id}_ensemble",
+        config={**vars(args), "ensemble_n_folds": len(fold_results)},
+        reinit=True,
+    )
+
+    # Load test set with the same input size as training (folds share input_size).
+    testset_loader, _testset_ds, testset_image_paths = load_external_testset(
+        args.testset_images_dir,
+        args.batch_size,
+        args.num_workers,
+        device,
+        args.input_size,
+    )
+    print(
+        f"[Ensemble] Loaded {len(testset_image_paths)} test images from "
+        f"{args.testset_images_dir}"
+    )
+
+    projected_prevalence = 0.01
+
+    # Per-fold inference on the test set.
+    per_fold_test_scores = []
+    per_fold_val_metrics = []
+    per_fold_val_projected = []
+    per_fold_test_metrics = []
+    per_fold_test_projected = []
+    all_val_targets = []
+    all_val_scores = []
+
+    test_targets_ref = None
+    for fr in fold_results:
+        cfg = fr["checkpoint_model_config"]
+        model = Model(
+            in_channels=cfg.get("in_channels", 3),
+            n_classes=cfg.get("n_classes", 2),
+            backbone_name=cfg["backbone_name"],
+            backbone_weights_path=None,
+            input_size=cfg["input_size"],
+            freeze_backbone=False,
+            pretrained=False,
+            proj_dim=cfg.get("proj_dim", 128),
+            head_type=cfg["head_type"],
+            head_hidden_dim=cfg.get("head_hidden_dim"),
+            head_dropout=cfg.get("head_dropout", 0.0),
+            mlp_hidden_layers=cfg.get("mlp_hidden_layers", 1),
+            mlp_hidden_dim=cfg.get("mlp_hidden_dim"),
+            mlp_dropout=cfg.get("mlp_dropout", 0.0),
+            knn_neighbors=cfg.get("knn_neighbors", 5),
+            svm_C=cfg.get("svm_C", 2.0),
+        ).to(device)
+        load_model_checkpoint(model, fr["best_save_path"], map_location=device)
+
+        t_targets, t_scores = collect_scores(model, testset_loader, device)
+        if test_targets_ref is None:
+            test_targets_ref = t_targets
+        per_fold_test_scores.append(np.asarray(t_scores, dtype=np.float64))
+
+        # Each fold's threshold is selected on its own (OOD-like) validation center.
+        val_metrics = fr["val_metrics"]
+        val_threshold = val_metrics["Threshold"]
+        test_metrics_fold = compute_group_eval_metrics(
+            t_targets, t_scores, threshold=val_threshold
+        )
+        test_projected_fold = project_operating_metrics_to_prevalence(
+            test_metrics_fold, prevalence=projected_prevalence
+        )
+
+        per_fold_val_metrics.append(val_metrics)
+        per_fold_val_projected.append(fr["val_projected_metrics"])
+        per_fold_test_metrics.append(test_metrics_fold)
+        per_fold_test_projected.append(test_projected_fold)
+
+        # Pool val predictions for a cross-center threshold (each model evaluated only
+        # on its own held-out center; concatenation covers the whole dataset OOD).
+        all_val_targets.extend(fr["val_targets"])
+        all_val_scores.extend(fr["val_scores"])
+
+        print(
+            f"[Ensemble] fold {fr['fold_index']} (val={fr['holdout_center']}) | "
+            f"Val AUPRC={val_metrics['AUPRC']:.4f} AUROC={val_metrics['AUROC']:.4f} "
+            f"PPV@90R={val_metrics['PPV@90RECALL']:.4f} | "
+            f"Test AUPRC={test_metrics_fold['AUPRC']:.4f} "
+            f"AUROC={test_metrics_fold['AUROC']:.4f} "
+            f"PPV@90R={test_metrics_fold['PPV@90RECALL']:.4f}"
+        )
+
+    # Ensemble: average the per-fold positive-class probabilities.
+    ensemble_scores = np.mean(np.stack(per_fold_test_scores, axis=0), axis=0).tolist()
+
+    # Cross-center threshold from pooled OOD val predictions.
+    pooled_val_threshold = select_highest_threshold_for_target_recall(
+        all_val_targets, all_val_scores, recall_target=0.90
+    )
+    pooled_val_metrics = compute_group_eval_metrics(
+        all_val_targets, all_val_scores, threshold=pooled_val_threshold
+    )
+    pooled_val_projected = project_operating_metrics_to_prevalence(
+        pooled_val_metrics, prevalence=projected_prevalence
+    )
+
+    # Ensemble test metrics: scored at both (a) the pooled OOD threshold and (b) the
+    # ensemble's own 90%-recall threshold (selected on the test set, optimistic).
+    ensemble_test_metrics_pooled_thr = compute_group_eval_metrics(
+        test_targets_ref, ensemble_scores, threshold=pooled_val_threshold
+    )
+    ensemble_test_projected_pooled_thr = project_operating_metrics_to_prevalence(
+        ensemble_test_metrics_pooled_thr, prevalence=projected_prevalence
+    )
+    ensemble_test_metrics_self_thr = compute_group_eval_metrics(
+        test_targets_ref, ensemble_scores
+    )
+
+    # Persist ensemble predictions to disk.
+    ensemble_path = os.path.join(base_save_dir, f"{base_experiment_id}_ensemble.npz")
+    np.savez(
+        ensemble_path,
+        test_image_paths=np.asarray([str(p) for p in testset_image_paths]),
+        test_targets=np.asarray(test_targets_ref, dtype=np.int64),
+        ensemble_scores=np.asarray(ensemble_scores, dtype=np.float32),
+        per_fold_test_scores=np.stack(per_fold_test_scores, axis=0).astype(np.float32),
+        pooled_val_threshold=np.float32(pooled_val_threshold),
+    )
+    print(f"[Ensemble] Saved ensemble predictions to {ensemble_path}")
+
+    # Build the wandb payload: per-fold + summaries + ensemble.
+    payload = OrderedDict()
+    payload["ensemble/n_folds"] = len(fold_results)
+    payload["ensemble/pooled_val_threshold"] = pooled_val_threshold
+
+    for fr, vm, vp, tm, tp in zip(
+        fold_results,
+        per_fold_val_metrics,
+        per_fold_val_projected,
+        per_fold_test_metrics,
+        per_fold_test_projected,
+    ):
+        i = fr["fold_index"]
+        c = fr["holdout_center"]
+        prefix_val = f"fold{i}_{c}/val"
+        prefix_test = f"fold{i}_{c}/test"
+        for key in ("AUPRC", "AUROC", "PPV@90RECALL", "Threshold", "TPR", "FPR", "PPV", "F1"):
+            if key in vm:
+                payload[f"{prefix_val}/{key}"] = vm[key]
+            if key in tm:
+                payload[f"{prefix_test}/{key}"] = tm[key]
+        payload[f"{prefix_val}/Positive Samples"] = vm.get("Positive Samples (label 1)", 0)
+        payload[f"{prefix_val}/Negative Samples"] = vm.get("Negative Samples (label 0)", 0)
+        payload[f"{prefix_val}/Projected PPV@1%"] = vp.get("Projected PPV", float("nan"))
+        payload[f"{prefix_val}/Projected FP per 1000@1%"] = vp.get(
+            "Projected FP per 1000", float("nan")
+        )
+        payload[f"{prefix_test}/Projected PPV@1%"] = tp.get("Projected PPV", float("nan"))
+        payload[f"{prefix_test}/Projected FP per 1000@1%"] = tp.get(
+            "Projected FP per 1000", float("nan")
+        )
+
+    # Cross-fold summaries (mean/std/min/max) at the *projected* prevalence so the
+    # folds are comparable despite different center prevalences.
+    val_summary = summarize_fold_metrics(per_fold_val_metrics, prefix="summary/val/")
+    val_proj_summary = summarize_fold_metrics(
+        per_fold_val_projected, prefix="summary/val_proj1pct/"
+    )
+    test_summary = summarize_fold_metrics(per_fold_test_metrics, prefix="summary/test/")
+    test_proj_summary = summarize_fold_metrics(
+        per_fold_test_projected, prefix="summary/test_proj1pct/"
+    )
+    payload.update(val_summary)
+    payload.update(val_proj_summary)
+    payload.update(test_summary)
+    payload.update(test_proj_summary)
+
+    # Ensemble metrics on the external test set.
+    payload["ensemble/test/AUPRC"] = ensemble_test_metrics_pooled_thr["AUPRC"]
+    payload["ensemble/test/AUROC"] = ensemble_test_metrics_pooled_thr["AUROC"]
+    payload["ensemble/test/PPV@90RECALL"] = ensemble_test_metrics_pooled_thr["PPV@90RECALL"]
+    payload["ensemble/test/Threshold (pooled OOD val)"] = pooled_val_threshold
+    payload["ensemble/test/TPR (pooled OOD thr)"] = ensemble_test_metrics_pooled_thr["TPR"]
+    payload["ensemble/test/FPR (pooled OOD thr)"] = ensemble_test_metrics_pooled_thr["FPR"]
+    payload["ensemble/test/PPV (pooled OOD thr)"] = ensemble_test_metrics_pooled_thr["PPV"]
+    payload["ensemble/test/F1 (pooled OOD thr)"] = ensemble_test_metrics_pooled_thr["F1"]
+    payload["ensemble/test_proj1pct/PPV"] = ensemble_test_projected_pooled_thr.get(
+        "Projected PPV", float("nan")
+    )
+    payload["ensemble/test_proj1pct/FP per 1000"] = ensemble_test_projected_pooled_thr.get(
+        "Projected FP per 1000", float("nan")
+    )
+    payload["ensemble/test/Self-Threshold (optimistic)"] = ensemble_test_metrics_self_thr[
+        "Threshold"
+    ]
+    payload["ensemble/test/PPV@90R (self-threshold, optimistic)"] = (
+        ensemble_test_metrics_self_thr["PPV@90RECALL"]
+    )
+
+    # Pooled-OOD val performance (cross-fold concatenation).
+    payload["pooled_val/AUPRC"] = pooled_val_metrics["AUPRC"]
+    payload["pooled_val/AUROC"] = pooled_val_metrics["AUROC"]
+    payload["pooled_val/PPV@90RECALL"] = pooled_val_metrics["PPV@90RECALL"]
+    payload["pooled_val/Threshold"] = pooled_val_threshold
+    payload["pooled_val_proj1pct/PPV"] = pooled_val_projected.get(
+        "Projected PPV", float("nan")
+    )
+
+    wandb.log(payload)
+    for k, v in payload.items():
+        try:
+            wandb.summary[k] = v
+        except Exception:
+            pass
+
+    print(
+        f"\n[Ensemble] Pooled OOD val | AUPRC={pooled_val_metrics['AUPRC']:.4f} "
+        f"AUROC={pooled_val_metrics['AUROC']:.4f} "
+        f"PPV@90R={pooled_val_metrics['PPV@90RECALL']:.4f} "
+        f"thr={pooled_val_threshold:.4f}"
+    )
+    print(
+        f"[Ensemble] Test (avg of {len(fold_results)} folds) @ pooled-OOD thr | "
+        f"AUPRC={ensemble_test_metrics_pooled_thr['AUPRC']:.4f} "
+        f"AUROC={ensemble_test_metrics_pooled_thr['AUROC']:.4f} "
+        f"PPV@90R={ensemble_test_metrics_pooled_thr['PPV@90RECALL']:.4f} "
+        f"PPV={ensemble_test_metrics_pooled_thr['PPV']:.4f} "
+        f"TPR={ensemble_test_metrics_pooled_thr['TPR']:.4f} "
+        f"FPR={ensemble_test_metrics_pooled_thr['FPR']:.4f}"
+    )
+    print(
+        f"[Ensemble] Mean per-fold test AUPRC="
+        f"{val_summary.get('summary/val/AUPRC/mean', float('nan')):.4f} ± "
+        f"{val_summary.get('summary/val/AUPRC/std', float('nan')):.4f} "
+        f"(val) | "
+        f"{test_summary.get('summary/test/AUPRC/mean', float('nan')):.4f} ± "
+        f"{test_summary.get('summary/test/AUPRC/std', float('nan')):.4f} (test)"
+    )
+
+    # --- Submission-ready single .pt: weight-averaged model -------------------------
+    # The backbone is frozen during finetune (identical across folds), so averaging
+    # state_dicts effectively averages only the trainable cls_head — equivalent to a
+    # softmax ensemble of linear heads up to the softmax non-linearity. Produces a
+    # single model with the same architecture, immediately loadable for submission.
+    cfg0 = fold_results[0]["checkpoint_model_config"]
+    submission_model = Model(
+        in_channels=cfg0.get("in_channels", 3),
+        n_classes=cfg0.get("n_classes", 2),
+        backbone_name=cfg0["backbone_name"],
+        backbone_weights_path=None,
+        input_size=cfg0["input_size"],
+        freeze_backbone=False,
+        pretrained=False,
+        proj_dim=cfg0.get("proj_dim", 128),
+        head_type=cfg0["head_type"],
+        head_hidden_dim=cfg0.get("head_hidden_dim"),
+        head_dropout=cfg0.get("head_dropout", 0.0),
+        mlp_hidden_layers=cfg0.get("mlp_hidden_layers", 1),
+        mlp_hidden_dim=cfg0.get("mlp_hidden_dim"),
+        mlp_dropout=cfg0.get("mlp_dropout", 0.0),
+        knn_neighbors=cfg0.get("knn_neighbors", 5),
+        svm_C=cfg0.get("svm_C", 2.0),
+    ).to(device)
+
+    fold_state_dicts = []
+    for fr in fold_results:
+        ckpt = _torch.load(fr["best_save_path"], map_location=device)
+        # `model_state_dict` is the format produced by create_model_checkpoint.
+        if "model_state_dict" in ckpt:
+            fold_state_dicts.append(ckpt["model_state_dict"])
+        elif "state_dict" in ckpt:
+            fold_state_dicts.append(ckpt["state_dict"])
+        else:
+            raise RuntimeError(
+                f"Checkpoint {fr['best_save_path']} has no 'model_state_dict' or 'state_dict'."
+            )
+
+    averaged_state = OrderedDict()
+    reference_keys = list(fold_state_dicts[0].keys())
+    skipped_keys = []
+    for key in reference_keys:
+        tensors = []
+        for sd in fold_state_dicts:
+            if key not in sd:
+                tensors = []
+                break
+            tensors.append(sd[key].to(device=device, dtype=_torch.float32))
+        if not tensors:
+            skipped_keys.append(key)
+            averaged_state[key] = fold_state_dicts[0][key]  # fall back to fold-0 weights
+            continue
+        if not all(t.dtype.is_floating_point for t in tensors):
+            # Non-float buffers (e.g. BN num_batches_tracked) — keep fold-0 value.
+            averaged_state[key] = fold_state_dicts[0][key]
+            continue
+        stacked = _torch.stack(tensors, dim=0)
+        averaged = stacked.mean(dim=0).to(fold_state_dicts[0][key].dtype)
+        averaged_state[key] = averaged
+    if skipped_keys:
+        print(
+            f"[Submission] {len(skipped_keys)} key(s) were not present in all folds and "
+            f"fell back to fold-0 values: {skipped_keys[:5]}{'…' if len(skipped_keys) > 5 else ''}"
+        )
+
+    incompatible = submission_model.load_state_dict(averaged_state, strict=False)
+    if incompatible.missing_keys or incompatible.unexpected_keys:
+        print(
+            f"[Submission] Warning loading averaged state: "
+            f"missing={incompatible.missing_keys[:5]} "
+            f"unexpected={incompatible.unexpected_keys[:5]}"
+        )
+
+    # Evaluate the weight-averaged model on the external test set for a sanity check.
+    submission_test_targets, submission_test_scores = collect_scores(
+        submission_model, testset_loader, device
+    )
+    submission_test_metrics_pooled_thr = compute_group_eval_metrics(
+        submission_test_targets, submission_test_scores, threshold=pooled_val_threshold
+    )
+    submission_test_projected = project_operating_metrics_to_prevalence(
+        submission_test_metrics_pooled_thr, prevalence=projected_prevalence
+    )
+    submission_test_self_thr = compute_group_eval_metrics(
+        submission_test_targets, submission_test_scores
+    )
+
+    submission_path = os.path.join(
+        base_save_dir, f"{base_experiment_id}_submission.pt"
+    )
+    _torch.save(
+        create_model_checkpoint(
+            submission_model,
+            cfg0,
+            extra_metadata={
+                "experiment_id": base_experiment_id,
+                "stage": args.stage,
+                "loss_name": args.loss_name,
+                "selected_threshold": float(pooled_val_threshold),
+                "loco_folds": [fr["fold_index"] for fr in fold_results],
+                "loco_centers": [fr["holdout_center"] for fr in fold_results],
+                "loco_fold_checkpoints": [fr["best_save_path"] for fr in fold_results],
+                "loco_pooled_val_AUPRC": float(pooled_val_metrics["AUPRC"]),
+                "loco_pooled_val_AUROC": float(pooled_val_metrics["AUROC"]),
+                "loco_pooled_val_PPV@90R": float(pooled_val_metrics["PPV@90RECALL"]),
+                "submission_test_AUPRC": float(submission_test_metrics_pooled_thr["AUPRC"]),
+                "submission_test_AUROC": float(submission_test_metrics_pooled_thr["AUROC"]),
+                "submission_test_PPV@90R": float(submission_test_metrics_pooled_thr["PPV@90RECALL"]),
+                "submission_kind": "loco_weight_average",
+            },
+        ),
+        submission_path,
+    )
+    print(
+        f"\n[Submission] Saved weight-averaged single-file model: {submission_path}"
+    )
+    print(
+        f"[Submission] Test (weight-avg) @ pooled-OOD thr | "
+        f"AUPRC={submission_test_metrics_pooled_thr['AUPRC']:.4f} "
+        f"AUROC={submission_test_metrics_pooled_thr['AUROC']:.4f} "
+        f"PPV@90R={submission_test_metrics_pooled_thr['PPV@90RECALL']:.4f} "
+        f"PPV={submission_test_metrics_pooled_thr['PPV']:.4f} "
+        f"TPR={submission_test_metrics_pooled_thr['TPR']:.4f} "
+        f"FPR={submission_test_metrics_pooled_thr['FPR']:.4f}"
+    )
+    print(
+        f"[Submission] Calibrated threshold (use for inference): "
+        f"{pooled_val_threshold:.6f}"
+    )
+
+    # Persist a small JSON sidecar so the submission threshold + metadata is also
+    # human-readable without having to load the .pt.
+    import json as _json
+
+    sidecar_path = os.path.join(
+        base_save_dir, f"{base_experiment_id}_submission.json"
+    )
+    with open(sidecar_path, "w") as f:
+        _json.dump(
+            {
+                "checkpoint": os.path.basename(submission_path),
+                "selected_threshold": float(pooled_val_threshold),
+                "loco_centers": [fr["holdout_center"] for fr in fold_results],
+                "submission_kind": "loco_weight_average",
+                "pooled_val_AUPRC": float(pooled_val_metrics["AUPRC"]),
+                "pooled_val_AUROC": float(pooled_val_metrics["AUROC"]),
+                "pooled_val_PPV@90R": float(pooled_val_metrics["PPV@90RECALL"]),
+                "test_AUPRC_weight_avg": float(submission_test_metrics_pooled_thr["AUPRC"]),
+                "test_AUROC_weight_avg": float(submission_test_metrics_pooled_thr["AUROC"]),
+                "test_PPV@90R_weight_avg": float(submission_test_metrics_pooled_thr["PPV@90RECALL"]),
+                "test_AUPRC_prob_avg": float(ensemble_test_metrics_pooled_thr["AUPRC"]),
+                "test_AUROC_prob_avg": float(ensemble_test_metrics_pooled_thr["AUROC"]),
+                "test_PPV@90R_prob_avg": float(ensemble_test_metrics_pooled_thr["PPV@90RECALL"]),
+                "input_size": cfg0["input_size"],
+                "backbone_name": cfg0["backbone_name"],
+                "head_type": cfg0["head_type"],
+                "n_classes": cfg0.get("n_classes", 2),
+            },
+            f,
+            indent=2,
+        )
+    print(f"[Submission] Saved metadata sidecar: {sidecar_path}")
+
+    # Log weight-avg results to the ensemble wandb run too.
+    submission_payload = OrderedDict([
+        ("submission/path", submission_path),
+        ("submission/selected_threshold", float(pooled_val_threshold)),
+        ("submission/test/AUPRC", submission_test_metrics_pooled_thr["AUPRC"]),
+        ("submission/test/AUROC", submission_test_metrics_pooled_thr["AUROC"]),
+        ("submission/test/PPV@90RECALL", submission_test_metrics_pooled_thr["PPV@90RECALL"]),
+        ("submission/test/TPR", submission_test_metrics_pooled_thr["TPR"]),
+        ("submission/test/FPR", submission_test_metrics_pooled_thr["FPR"]),
+        ("submission/test/PPV", submission_test_metrics_pooled_thr["PPV"]),
+        ("submission/test/F1", submission_test_metrics_pooled_thr["F1"]),
+        ("submission/test_proj1pct/PPV", submission_test_projected.get("Projected PPV", float("nan"))),
+        ("submission/test_proj1pct/FP per 1000", submission_test_projected.get("Projected FP per 1000", float("nan"))),
+        ("submission/test/Self-Threshold (optimistic)", submission_test_self_thr["Threshold"]),
+        ("submission/test/PPV@90R (self-threshold, optimistic)", submission_test_self_thr["PPV@90RECALL"]),
+    ])
+    wandb.log(submission_payload)
+    for k, v in submission_payload.items():
+        try:
+            wandb.summary[k] = v
+        except Exception:
+            pass
+
     wandb.finish()
 
 

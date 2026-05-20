@@ -243,74 +243,57 @@ class TwoViewDataset(Dataset):
         top = int(torch.randint(0, max(1, h - crop_h + 1), (1,)).item())
         return image.crop((left, top, left + crop_w, top + crop_h))
 
+    def _build_view(self, image, use_roi, roi_record):
+        """Build one view: ROI crop (if use_roi and record available) or random crop."""
+        if use_roi and roi_record is not None:
+            selected = self._select_roi_record(roi_record)
+            jitter_xy = self._sample_jitter()
+            roi_scale = float(torch.empty(1).uniform_(self.roi_min_crop_scale, 1.0).item())
+            crop = crop_image_to_roi(
+                image=image,
+                roi_record=selected,
+                context_scale=self.roi_context_scale,
+                min_crop_scale=roi_scale,
+                jitter_xy=jitter_xy,
+                max_aspect_ratio=self.roi_max_aspect_ratio,
+            )
+            return self.roi_transform2(crop)
+        # Random crop: use full scale range when ROI guidance is active, else near-full
+        if self.roi_guidance_active:
+            crop = self._random_full_image_crop_fixed_scale(image, self.roi_min_crop_scale, self.roi_max_crop_scale)
+        else:
+            crop = self._random_full_image_crop_fixed_scale(image, 0.9, 1.0)
+        return self.transform1(crop)
+
     def __getitem__(self, idx):
         img_path = self.df.loc[idx, "img"]
         image = Image.open(img_path).convert("RGB")
         label = int(self.df.loc[idx, "label"])
 
-        # View 1: Always a random full-context crop (90-100% of image)
-        image1 = self._random_full_image_crop_fixed_scale(image, 0.9, 1.0)
-
-        # Check if we're in warmup period (no crops for first N epochs)
         in_warmup = self.current_epoch < self.roi_warmup_epochs
-
-        # View 2: ROI crop (if available and not in warmup) or random full-context crop
         canonical_path = canonicalize_image_path(img_path)
 
-        # For positives: use positive ROI records
-        if label == self.roi_target_label:
+        # ROI is only available for positives and only after warmup
+        roi_record = None
+        if (
+            label == self.roi_target_label
+            and not in_warmup
+            and self.roi_guidance_active
+        ):
             roi_record = self.roi_records.get(canonical_path)
-            use_roi = (
-                not in_warmup
-                and self.roi_guidance_active
-                and roi_record is not None
-                and float(torch.rand(1).item()) <= self.roi_focus_prob
-            )
-            if use_roi:
-                selected_roi_record = self._select_roi_record(roi_record)
-                jitter_xy = self._sample_jitter()
-                roi_scale = float(torch.empty(1).uniform_(self.roi_min_crop_scale, 1.0).item())
-                image2 = crop_image_to_roi(
-                    image=image,
-                    roi_record=selected_roi_record,
-                    context_scale=self.roi_context_scale,
-                    min_crop_scale=roi_scale,
-                    jitter_xy=jitter_xy,
-                    max_aspect_ratio=self.roi_max_aspect_ratio,
-                )
-                return self.transform1(image1), self.roi_transform2(image2), label
 
-        # For negatives: use negative ROI records (hard negatives) if available
-        else:  # label != self.roi_target_label (i.e., negative)
-            neg_roi_record = self.negative_roi_records.get(canonical_path)
-            use_neg_roi = (
-                not in_warmup
-                and self.negative_roi_guidance_active
-                and neg_roi_record is not None
-                and float(torch.rand(1).item()) <= self.roi_negative_focus_prob
-            )
-            if use_neg_roi:
-                selected_roi_record = self._select_roi_record(neg_roi_record)
-                jitter_xy = self._sample_jitter()
-                roi_scale = float(torch.empty(1).uniform_(self.roi_min_crop_scale, 1.0).item())
-                image2 = crop_image_to_roi(
-                    image=image,
-                    roi_record=selected_roi_record,
-                    context_scale=self.roi_context_scale,
-                    min_crop_scale=roi_scale,
-                    jitter_xy=jitter_xy,
-                    max_aspect_ratio=self.roi_max_aspect_ratio,
-                )
-                return self.transform1(image1), self.roi_transform2(image2), label
-
-        # Fallback: random crop
-        if self.roi_guidance_active:
-            # ROI guidance active but not selected this sample - use same scale range for fair comparison
-            image2 = self._random_full_image_crop_fixed_scale(image, self.roi_min_crop_scale, self.roi_max_crop_scale)
+        # Positives: each view independently decides ROI vs random with roi_focus_prob
+        # Negatives: always random crop (0% ROI)
+        if label == self.roi_target_label:
+            v1_use_roi = float(torch.rand(1).item()) < self.roi_focus_prob
+            v2_use_roi = float(torch.rand(1).item()) < self.roi_focus_prob
         else:
-            # ROI guidance inactive - use full-context crop
-            image2 = self._random_full_image_crop_fixed_scale(image, 0.9, 1.0)
-        return self.transform1(image1), self.transform2(image2), label
+            v1_use_roi = False
+            v2_use_roi = False
+
+        image1 = self._build_view(image, v1_use_roi, roi_record)
+        image2 = self._build_view(image, v2_use_roi, roi_record)
+        return image1, image2, label
 
 
 class SupproROIDataset(Dataset):
@@ -746,7 +729,38 @@ def prepare_datasets(args, device):
     df, class_names = build_dataset_dataframe(data_dir)
     df["stratify_col"] = df["center"].astype(str) + "_" + df["label"].astype(str)
 
-    if num_folds <= 1:
+    if getattr(args, "loco", False):
+        # Leave-one-center-out cross-validation.
+        # fold_index k -> the k-th center (sorted alphabetically) is the validation set,
+        # all other centers are the training set. With 2 centers, k=0 holds out center_1
+        # (val on center_1, train on center_2) and k=1 holds out center_2.
+        centers_sorted = sorted(df["center"].unique())
+        if len(centers_sorted) < 2:
+            raise ValueError(
+                f"--loco requires at least 2 centers in the dataset, got {centers_sorted}."
+            )
+        if not (0 <= fold_index < len(centers_sorted)):
+            raise ValueError(
+                f"--fold-index must be in [0, {len(centers_sorted) - 1}] when --loco is set, "
+                f"got {fold_index}."
+            )
+        holdout_center = centers_sorted[fold_index]
+        train_centers = [c for c in centers_sorted if c != holdout_center]
+        val_mask = df["center"] == holdout_center
+        train_df = df.loc[~val_mask].copy()
+        val_df = df.loc[val_mask].copy()
+        print(
+            f"LOCO split | fold {fold_index}: "
+            f"train centers={train_centers} ({len(train_df)} imgs) | "
+            f"val center={holdout_center} ({len(val_df)} imgs)"
+        )
+        train_label_counts = train_df["label"].value_counts().to_dict()
+        val_label_counts = val_df["label"].value_counts().to_dict()
+        print(
+            f"LOCO split | label counts: "
+            f"train={train_label_counts} | val={val_label_counts}"
+        )
+    elif num_folds <= 1:
         train_df, val_df = train_test_split(
             df,
             test_size=0.2,

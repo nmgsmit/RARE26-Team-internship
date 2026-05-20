@@ -203,7 +203,55 @@ def compute_group_eval_metrics(y_true, y_score, recall_target=0.90, threshold=No
     return metrics
 
 
-def collect_scores(model, loader, device):
+def summarize_fold_metrics(per_fold_metrics, prefix=""):
+    """Aggregate a list of metric dicts (one per fold) into mean/std/min/max per key.
+
+    Numeric values are averaged; non-finite entries are skipped. Useful for LOCO
+    cross-validation reporting where prevalence may differ across folds — pair this
+    with `project_operating_metrics_to_prevalence` to compare folds at a common
+    reference prevalence.
+    """
+    if not per_fold_metrics:
+        return OrderedDict()
+    keys = []
+    for fold_metrics in per_fold_metrics:
+        for k in fold_metrics.keys():
+            if k not in keys:
+                keys.append(k)
+    summary = OrderedDict()
+    for key in keys:
+        values = []
+        for fold_metrics in per_fold_metrics:
+            raw = fold_metrics.get(key, None)
+            if raw is None:
+                continue
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(value):
+                continue
+            values.append(value)
+        if not values:
+            continue
+        arr = np.asarray(values, dtype=float)
+        out_key = f"{prefix}{key}" if prefix else key
+        summary[f"{out_key}/mean"] = float(arr.mean())
+        summary[f"{out_key}/std"] = float(arr.std(ddof=0)) if len(arr) > 1 else 0.0
+        summary[f"{out_key}/min"] = float(arr.min())
+        summary[f"{out_key}/max"] = float(arr.max())
+        summary[f"{out_key}/n_folds"] = int(len(arr))
+    return summary
+
+
+def collect_scores(model, loader, device, tta=True):
+    """Run validation/test inference and return (targets, positive-class probabilities).
+
+    With ``tta=True`` (default), averages softmax probabilities across the identity
+    view and its horizontal flip. This is a no-op for orientation-invariant features
+    and is cheap (one extra forward pass per batch). Endoscopy frames are invariant
+    to L/R reflection, so this is a safe TTA choice.
+    """
     y_true = []
     y_score = []
     model.eval()
@@ -211,8 +259,13 @@ def collect_scores(model, loader, device):
         for images, labels in loader:
             images = images.to(device)
             logits = model(images)
-            probs_neo = torch.softmax(logits, dim=1)[:, 1].detach().cpu().tolist()
-            y_score.extend(probs_neo)
+            probs_neo = torch.softmax(logits, dim=1)[:, 1]
+            if tta:
+                flipped = torch.flip(images, dims=[-1])
+                logits_flip = model(flipped)
+                probs_flip = torch.softmax(logits_flip, dim=1)[:, 1]
+                probs_neo = 0.5 * (probs_neo + probs_flip)
+            y_score.extend(probs_neo.detach().cpu().tolist())
             y_true.extend(labels.detach().cpu().tolist())
     return y_true, y_score
 
