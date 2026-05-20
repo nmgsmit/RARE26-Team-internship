@@ -335,6 +335,11 @@ def create_model_checkpoint(model, model_config, extra_metadata=None):
     }
     if extra_metadata:
         payload.update(extra_metadata)
+
+    if hasattr(model, "is_sklearn_head") and model.is_sklearn_head and hasattr(model.head, "_fitted") and model.head._fitted:
+        import pickle
+        payload["sklearn_head_state"] = pickle.dumps(model.head._clf)
+
     return payload
 
 
@@ -493,6 +498,15 @@ def load_model_checkpoint(model, checkpoint_path, strict=True, map_location="cpu
             f"Missing keys: {incompatible.missing_keys}. "
             f"Unexpected keys: {incompatible.unexpected_keys}."
         )
+
+    if hasattr(model, "is_sklearn_head") and model.is_sklearn_head and "sklearn_head_state" in checkpoint:
+        import pickle
+        try:
+            model.head._clf = pickle.loads(checkpoint["sklearn_head_state"])
+            model.head._fitted = True
+        except (pickle.UnpicklingError, RuntimeError) as e:
+            print(f"[WARNING] Failed to load sklearn head state: {e}. Head will be unfitted.")
+
     return checkpoint, incompatible
 
 
