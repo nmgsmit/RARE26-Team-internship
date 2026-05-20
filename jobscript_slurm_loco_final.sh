@@ -45,6 +45,11 @@ export HF_HOME="${HF_HOME:-/scratch-shared/${USER}/hf_cache}"
 export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
 mkdir -p "${HF_HOME}" "${HF_HUB_CACHE}"
 
+# Required by torch.use_deterministic_algorithms(True) when running CUDA >= 10.2.
+# Without this, deterministic cuBLAS matmul (used inside the SupPro loss) crashes.
+# main.sh sets this for the legacy path; we set it here for the LOCO jobscript.
+export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
+
 # -----------------------------------------------------------------------------
 # Run configuration — change RUN_TAG between experiments to keep wandb tidy
 # -----------------------------------------------------------------------------
