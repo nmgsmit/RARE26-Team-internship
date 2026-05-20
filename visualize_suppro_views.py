@@ -5,7 +5,7 @@ Shows what the SupPro loss actually sees during training in a grid:
 - Rows: samples (default 5)
 - Columns: Original+ROI | View1 | View2
 - View1: random crop 0.9-1.0
-- View2: ROI crop (if available) or random fallback
+- View2: ROI crop (if available) or random fallback, or random crop 0.4-0.8 with --use-random-crops
 - Uses exact training augmentations at selectable intensity level
 
 Usage:
@@ -17,6 +17,9 @@ Usage:
 
     # Custom number of samples
     python visualize_suppro_views.py --label 1 --num-samples 10 --augmentation-intensity 2
+
+    # Use random crops instead of ROI-guided crops for View 2
+    python visualize_suppro_views.py --label 1 --use-random-crops --augmentation-intensity 2
 """
 
 import argparse
@@ -128,7 +131,7 @@ def tensor_to_pil(tensor):
     return tensor
 
 
-def create_sample_row(img_path, label, roi_records, transform1, transform2, augmentation_intensity):
+def create_sample_row(img_path, label, roi_records, transform1, transform2, augmentation_intensity, use_random_crops=False):
     """Create a 1x3 row for one sample: Original+ROI | View1 | View2."""
     img = Image.open(img_path).convert("RGB")
     canonical_path = canonicalize_image_path(img_path)
@@ -143,8 +146,11 @@ def create_sample_row(img_path, label, roi_records, transform1, transform2, augm
     view1 = transform1(view1_crop)
     col2 = tensor_to_pil(view1)
 
-    # Column 3: View 2 (ROI crop or random fallback, augmented)
-    if roi_record:
+    # Column 3: View 2 (ROI crop or random crop, augmented)
+    if use_random_crops:
+        # Random crop at 0.4-0.8 (no ROI guidance)
+        view2_crop = get_random_crop(img, 0.4, 0.8)
+    elif roi_record:
         # ROI crop at 0.4-0.8
         roi_scale = sample_crop_scale(0.4, 0.8)
         jitter_xy = sample_jitter(0.05)
@@ -215,6 +221,11 @@ def main():
         default=42,
         help="Random seed"
     )
+    parser.add_argument(
+        "--use-random-crops",
+        action="store_true",
+        help="Use random crops at 0.4-0.8 scale for View 2 instead of ROI-guided crops"
+    )
 
     args = parser.parse_args()
 
@@ -260,7 +271,10 @@ def main():
     print(f"Grid layout: {num_samples} rows x 3 columns")
     print(f"  Column 1: Original + Grad-CAM ROI bbox")
     print(f"  Column 2: View 1 (random crop 0.9-1.0 + augmentation)")
-    print(f"  Column 3: View 2 (ROI crop 0.4-0.8 + augmentation, or random fallback)")
+    if args.use_random_crops:
+        print(f"  Column 3: View 2 (random crop 0.4-0.8 + augmentation)")
+    else:
+        print(f"  Column 3: View 2 (ROI crop 0.4-0.8 + augmentation, or random fallback)")
 
     # Create grid of all samples
     total_height = TILE_SIZE * num_samples
@@ -274,7 +288,8 @@ def main():
 
         try:
             sample_row = create_sample_row(
-                img_path, args.label, roi_records, transform1, transform2, args.augmentation_intensity
+                img_path, args.label, roi_records, transform1, transform2, args.augmentation_intensity,
+                use_random_crops=args.use_random_crops
             )
             grid.paste(sample_row, (0, i * TILE_SIZE))
             print(f"  [{i+1}/{num_samples}] {Path(img_path).name}")
