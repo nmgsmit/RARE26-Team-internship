@@ -99,9 +99,13 @@ def main():
 
     if is_sklearn_head and not head_fitted:
         raise RuntimeError(
-            f"Model uses {head_type} classifier head which requires fitting on training data. "
-            f"The checkpoint does not contain a fitted {head_type} model. "
-            "Please ensure the checkpoint includes a fitted sklearn classifier or retrain the model."
+            f"[ERROR] Model uses {head_type} classifier head which must be fitted during training.\n"
+            f"        The checkpoint does not contain a fitted {head_type} model.\n"
+            f"        Ensure that:\n"
+            f"        1. The training code properly fits the {head_type} head on training features\n"
+            f"        2. The checkpoint is saved AFTER the {head_type} head is fitted\n"
+            f"        3. The checkpoint includes the fitted sklearn model state\n"
+            f"        4. If training from scratch, call model.head.fit(X_train, y_train) before saving"
         )
 
     with open(OUT_FILE, "w", newline="") as handle:

@@ -351,9 +351,16 @@ def create_model_checkpoint(model, model_config, extra_metadata=None):
     if extra_metadata:
         payload.update(extra_metadata)
 
-    if hasattr(model, "is_sklearn_head") and model.is_sklearn_head and hasattr(model.head, "_fitted") and model.head._fitted:
-        import pickle
-        payload["sklearn_head_state"] = pickle.dumps(model.head._clf)
+    if hasattr(model, "is_sklearn_head") and model.is_sklearn_head:
+        if hasattr(model.head, "_fitted") and model.head._fitted:
+            import pickle
+            try:
+                payload["sklearn_head_state"] = pickle.dumps(model.head._clf)
+                print(f"[INFO] Saved fitted {model.head_type if hasattr(model, 'head_type') else 'sklearn'} head to checkpoint.")
+            except Exception as e:
+                print(f"[WARNING] Failed to pickle sklearn head: {e}")
+        else:
+            print(f"[WARNING] Model has sklearn head but it is not fitted. Checkpoint will not include sklearn_head_state.")
 
     return payload
 
@@ -514,13 +521,18 @@ def load_model_checkpoint(model, checkpoint_path, strict=True, map_location="cpu
             f"Unexpected keys: {incompatible.unexpected_keys}."
         )
 
-    if hasattr(model, "is_sklearn_head") and model.is_sklearn_head and "sklearn_head_state" in checkpoint:
-        import pickle
-        try:
-            model.head._clf = pickle.loads(checkpoint["sklearn_head_state"])
-            model.head._fitted = True
-        except (pickle.UnpicklingError, RuntimeError) as e:
-            print(f"[WARNING] Failed to load sklearn head state: {e}. Head will be unfitted.")
+    if hasattr(model, "is_sklearn_head") and model.is_sklearn_head:
+        if "sklearn_head_state" in checkpoint:
+            import pickle
+            try:
+                model.head._clf = pickle.loads(checkpoint["sklearn_head_state"])
+                model.head._fitted = True
+                print(f"[INFO] Successfully loaded fitted {model.head_type if hasattr(model, 'head_type') else 'sklearn'} head from checkpoint.")
+            except (pickle.UnpicklingError, RuntimeError) as e:
+                print(f"[WARNING] Failed to load sklearn head state: {e}. Head will be unfitted.")
+        else:
+            print(f"[WARNING] Model uses sklearn head but checkpoint does not contain 'sklearn_head_state'. "
+                  "Head was not fitted during training or checkpoint was not saved after fitting.")
 
     return checkpoint, incompatible
 
