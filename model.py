@@ -251,7 +251,7 @@ def infer_backbone_architecture_from_state_dict(state_dict):
     return {}
 
 
-def infer_model_config_from_state_dict(state_dict):
+def infer_model_config_from_state_dict(state_dict, checkpoint=None):
     state_keys = set(state_dict.keys())
 
     if "head.logit_scale" in state_keys:
@@ -297,9 +297,20 @@ def infer_model_config_from_state_dict(state_dict):
             "n_classes": int(state_dict["head.weight"].shape[0]),
         }
 
+    if checkpoint and isinstance(checkpoint, dict):
+        model_config = checkpoint.get("model_config", {})
+        if isinstance(model_config, dict) and "head_type" in model_config:
+            head_type = model_config["head_type"]
+            if head_type in ("knn", "svm"):
+                n_classes = int(model_config.get("n_classes", 2))
+                return {
+                    "head_type": head_type,
+                    "n_classes": n_classes,
+                }
+
     raise ValueError(
         "Could not infer classifier head config from checkpoint state_dict. "
-        "Expected a supported head layout under the 'head.' prefix."
+        "Expected a supported head layout under the 'head.' prefix or valid model_config with head_type."
     )
 
 
@@ -314,11 +325,15 @@ def resolve_model_kwargs_from_checkpoint(checkpoint, fallback_kwargs=None):
     state_dict = extract_model_state_dict(checkpoint)
     inferred_backbone_arch_kwargs = infer_backbone_architecture_from_state_dict(state_dict)
     inferred_backbone_kwargs = infer_backbone_input_config_from_state_dict(state_dict)
-    inferred_kwargs = infer_model_config_from_state_dict(state_dict)
-    inferred_kwargs["classifier_input"] = _infer_classifier_input_from_state_dict(
-        state_dict, inferred_kwargs
-    )
-    inferred_kwargs.pop("classifier_input_dim", None)
+    inferred_kwargs = infer_model_config_from_state_dict(state_dict, checkpoint=checkpoint)
+
+    if "classifier_input_dim" in inferred_kwargs:
+        inferred_kwargs["classifier_input"] = _infer_classifier_input_from_state_dict(
+            state_dict, inferred_kwargs
+        )
+        inferred_kwargs.pop("classifier_input_dim", None)
+    else:
+        inferred_kwargs["classifier_input"] = "pooled"
 
     resolved_kwargs = dict(fallback_kwargs)
     resolved_kwargs.update(inferred_backbone_arch_kwargs)
