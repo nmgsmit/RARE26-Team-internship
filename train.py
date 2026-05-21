@@ -2198,6 +2198,26 @@ def _run_ensemble(args, fold_results, centers_sorted):
             f"unexpected={incompatible.unexpected_keys[:5]}"
         )
 
+    # For sklearn heads (KNN, SVM) the fitted estimator lives in a pickle key
+    # `sklearn_head_state` — NOT in model_state_dict — so weight-averaging does
+    # nothing useful.  Restore fold-0's fitted estimator as the best single proxy.
+    if submission_model.is_sklearn_head:
+        import pickle as _pickle
+        fold0_ckpt = _torch.load(fold_results[0]["best_save_path"], map_location="cpu")
+        if "sklearn_head_state" in fold0_ckpt:
+            submission_model.head._clf = _pickle.loads(fold0_ckpt["sklearn_head_state"])
+            submission_model.head._fitted = True
+            print(
+                f"[Submission] {cfg0['head_type'].upper()} head: loaded fold-0 fitted "
+                "estimator (weight-averaging is not meaningful for sklearn heads; "
+                "fold-0 estimator used as submission proxy)."
+            )
+        else:
+            raise RuntimeError(
+                f"[Submission] fold-0 checkpoint has no sklearn_head_state. "
+                f"The {cfg0['head_type']} submission model cannot be built."
+            )
+
     # Evaluate the weight-averaged model on the external test set for a sanity check.
     submission_test_targets, submission_test_scores = collect_scores(
         submission_model, testset_loader, device
