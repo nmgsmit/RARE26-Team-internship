@@ -49,6 +49,8 @@ export CUBLAS_WORKSPACE_CONFIG=":4096:8"
 RUN_TAG="${RUN_TAG:-best_model}"
 WANDB_GROUP="${WANDB_GROUP:-best_model}"
 MIN_CROP_SCALE="${MIN_CROP_SCALE:-0.4}"
+FINETUNE_EPOCHS="${FINETUNE_EPOCHS:-30}"
+HEADS="${HEADS:-knn linear svm mlp_fullwidth}"
 
 WANDB_PROJECT="RARE25-Project"
 PRETRAIN_SAVE_DIR="./checkpoints/${RUN_TAG}/pretrain"
@@ -68,7 +70,7 @@ COMMON_FINETUNE_ARGS=(
     --backbone-weights-path ../Gastronet/dinov2.pth
     --loco
     --batch-size 32
-    --epochs 30
+    --epochs "${FINETUNE_EPOCHS}"
     --finetune-lr 2e-4
     --warmup-epochs 3
     --augmentation-intensity 3
@@ -108,17 +110,18 @@ run_finetune() {
     echo "  Metadata   : ${save_dir}/${RUN_TAG}_finetune_${head}_submission.json"
 }
 
-# ── Run all four heads sequentially ───────────────────────────────────────────
-run_finetune "knn"
-run_finetune "linear"
-run_finetune "svm"
-run_finetune "mlp_fullwidth"
+# ── Run heads sequentially (HEADS env var controls which ones) ────────────────
+# shellcheck disable=SC2086
+for head in ${HEADS}; do
+    run_finetune "${head}"
+done
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "================================================================="
 echo "All heads complete for RUN_TAG=${RUN_TAG}. Submission artifacts:"
-for head in knn linear svm mlp_fullwidth; do
+# shellcheck disable=SC2086
+for head in ${HEADS}; do
     echo "  [${head}] ./checkpoints/${RUN_TAG}/finetune/${head}/${RUN_TAG}_finetune_${head}_submission.pt"
 done
 echo "================================================================="

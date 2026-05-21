@@ -49,6 +49,7 @@ export CUBLAS_WORKSPACE_CONFIG=":4096:8"
 RUN_TAG="${RUN_TAG:-best_model}"
 WANDB_GROUP="${WANDB_GROUP:-best_model}"
 MIN_CROP_SCALE="${MIN_CROP_SCALE:-0.4}"
+PRETRAIN_EPOCHS="${PRETRAIN_EPOCHS:-30}"
 
 WANDB_PROJECT="RARE25-Project"
 PRETRAIN_SAVE_DIR="./checkpoints/${RUN_TAG}/pretrain"
@@ -71,7 +72,7 @@ python train.py \
     --backbone-weights-path ../Gastronet/dinov2.pth \
     --loco \
     --batch-size 32 \
-    --epochs 30 \
+    --epochs "${PRETRAIN_EPOCHS}" \
     --pretrain-backbone-lr 1e-5 \
     --pretrain-proj-lr 3e-4 \
     --warmup-epochs 3 \
