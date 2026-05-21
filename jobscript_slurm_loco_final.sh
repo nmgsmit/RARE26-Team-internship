@@ -93,10 +93,11 @@ python train.py \
     --base-temperature 0.07 \
     --augmentation-intensity 3 \
     --roi-focus-prob 0.5 \
-    --roi-negative-focus-prob 0.5 \
+    --roi-negative-focus-prob 0.0 \
     --roi-warmup-epochs 5 \
     --roi-context-scale 2.0 \
     --roi-min-crop-scale 0.4 \
+    --roi-max-crop-scale 1.0 \
     --roi-center-jitter 0.05 \
     --roi-max-aspect-ratio 1.5 \
     --num-workers 10 \
@@ -129,10 +130,11 @@ python train.py \
     --warmup-epochs 3 \
     --augmentation-intensity 3 \
     --roi-focus-prob 0.5 \
-    --roi-negative-focus-prob 0.5 \
+    --roi-negative-focus-prob 0.0 \
     --roi-warmup-epochs 5 \
     --roi-context-scale 2.0 \
     --roi-min-crop-scale 0.4 \
+    --roi-max-crop-scale 1.0 \
     --roi-center-jitter 0.05 \
     --roi-max-aspect-ratio 1.5 \
     --num-workers 10 \
