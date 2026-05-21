@@ -19,6 +19,8 @@ PARTITION="${PARTITION:-gpu_a100}"
 PRETRAIN_TIME="${PRETRAIN_TIME:-24:00:00}"
 FINETUNE_TIME="${FINETUNE_TIME:-16:00:00}"
 
+export RUN_TAG="${RUN_TAG:-best_model}"
+export WANDB_GROUP="${WANDB_GROUP:-best_model}"
 export MIN_CROP_SCALE="${MIN_CROP_SCALE:-0.4}"
 
 echo "Submitting pretrain job (crop scale range [${MIN_CROP_SCALE}, 1.0])..."

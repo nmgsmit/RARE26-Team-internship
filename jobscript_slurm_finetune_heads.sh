@@ -8,14 +8,13 @@
 #SBATCH --output=slurm_trainmodel/slurm_finetune_heads-%j.out
 
 # Finetune four classifier heads (KNN, linear probe, SVM, MLP) on the LOCO
-# encoders produced by jobscript_slurm_pretrain.sh.  All heads share the same
-# encoder; each runs in sequence within this single job.
+# encoders produced by jobscript_slurm_pretrain.sh.
+# Configured via env vars — do not edit per-run, set vars in the submit script.
 #
-# Outputs per head:
-#   ./checkpoints/best_model/finetune/{head}/best_model_finetune_{head}_submission.pt
-#   ./checkpoints/best_model/finetune/{head}/best_model_finetune_{head}_submission.json
-#
-# Submit after pretrain completes (submit_best_model.sh handles this automatically).
+# Required env vars (all have defaults for standalone use):
+#   RUN_TAG        — must match the pretrain job  (default: best_model)
+#   WANDB_GROUP    — W&B group                    (default: best_model)
+#   MIN_CROP_SCALE — must match the pretrain job  (default: 0.4)
 
 set -euo pipefail
 mkdir -p slurm_trainmodel
@@ -46,22 +45,19 @@ mkdir -p "${HF_HOME}" "${HF_HUB_CACHE}"
 
 export CUBLAS_WORKSPACE_CONFIG=":4096:8"
 
-# ── Crop scale (must match jobscript_slurm_pretrain.sh) ──────────────────────
+# ── Run configuration (set by submit script, must match pretrain job) ─────────
+RUN_TAG="${RUN_TAG:-best_model}"
+WANDB_GROUP="${WANDB_GROUP:-best_model}"
 MIN_CROP_SCALE="${MIN_CROP_SCALE:-0.4}"
 
-# ── Paths (must match jobscript_slurm_pretrain.sh) ────────────────────────────
-RUN_TAG="best_model"
-WANDB_GROUP="best_model"
 WANDB_PROJECT="RARE25-Project"
 PRETRAIN_SAVE_DIR="./checkpoints/${RUN_TAG}/pretrain"
 
 # Encoder path template: train.py substitutes {fold_index} and {holdout_center}
-# per LOCO fold automatically, matching the filenames written by pretrain.
+# per LOCO fold, matching the filenames written by the pretrain job.
 ENCODER_CKPT_TEMPLATE="${PRETRAIN_SAVE_DIR}/fold{fold_index}_val_{holdout_center}/${RUN_TAG}_pretrain_fold{fold_index}_val_{holdout_center}_encoder.pt"
 
 # ── Shared finetune args ───────────────────────────────────────────────────────
-# Build the args that are identical across all four heads into an array so we
-# don't repeat ourselves and can't accidentally drift between heads.
 COMMON_FINETUNE_ARGS=(
     --stage finetune
     --loss-name label-smoothed-ce
@@ -76,6 +72,8 @@ COMMON_FINETUNE_ARGS=(
     --finetune-lr 2e-4
     --warmup-epochs 3
     --augmentation-intensity 3
+    --balanced-sampler
+    --pos-ratio 0.2
     --roi-focus-prob 0.5
     --roi-negative-focus-prob 0.0
     --roi-warmup-epochs 5
@@ -96,7 +94,7 @@ run_finetune() {
 
     echo ""
     echo "================================================================="
-    echo "Finetune | head=${head} | save_dir=${save_dir}"
+    echo "Finetune | RUN_TAG=${RUN_TAG} | head=${head}"
     echo "================================================================="
 
     python train.py \
@@ -110,7 +108,7 @@ run_finetune() {
     echo "  Metadata   : ${save_dir}/${RUN_TAG}_finetune_${head}_submission.json"
 }
 
-# ── Run all four heads ─────────────────────────────────────────────────────────
+# ── Run all four heads sequentially ───────────────────────────────────────────
 run_finetune "knn"
 run_finetune "linear"
 run_finetune "svm"
@@ -119,7 +117,7 @@ run_finetune "mlp_fullwidth"
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "================================================================="
-echo "All heads complete. Submission artifacts:"
+echo "All heads complete for RUN_TAG=${RUN_TAG}. Submission artifacts:"
 for head in knn linear svm mlp_fullwidth; do
     echo "  [${head}] ./checkpoints/${RUN_TAG}/finetune/${head}/${RUN_TAG}_finetune_${head}_submission.pt"
 done
