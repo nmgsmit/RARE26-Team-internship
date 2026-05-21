@@ -34,9 +34,10 @@ for scale in "${SCALES[@]}"; do
     scale_tag="scale${scale//./}"
     run_tag="P8_${scale_tag}"
 
-    export RUN_TAG="${run_tag}"
-    export WANDB_GROUP="${WANDB_GROUP}"
-    export MIN_CROP_SCALE="${scale}"
+    # Use --export to bake the variables directly into each sbatch call.
+    # This is more reliable than relying on the cluster to propagate
+    # exported shell variables, which varies between SLURM configurations.
+    SBATCH_EXPORT="ALL,RUN_TAG=${run_tag},WANDB_GROUP=${WANDB_GROUP},MIN_CROP_SCALE=${scale}"
 
     echo "── Scale ${scale} (RUN_TAG=${run_tag}) ──────────────────────────────"
 
@@ -46,6 +47,7 @@ for scale in "${SCALES[@]}"; do
         --time="${PRETRAIN_TIME}" \
         --job-name="pretrain_${run_tag}" \
         --output="slurm_trainmodel/slurm_pretrain_${run_tag}-%j.out" \
+        --export="${SBATCH_EXPORT}" \
         jobscript_slurm_pretrain.sh)
 
     echo "  Pretrain job ID : ${pretrain_job_id}"
@@ -57,6 +59,7 @@ for scale in "${SCALES[@]}"; do
         --job-name="finetune_${run_tag}" \
         --output="slurm_trainmodel/slurm_finetune_${run_tag}-%j.out" \
         --dependency="afterok:${pretrain_job_id}" \
+        --export="${SBATCH_EXPORT}" \
         jobscript_slurm_finetune_heads.sh)
 
     echo "  Finetune job ID : ${finetune_job_id} (depends on ${pretrain_job_id})"
