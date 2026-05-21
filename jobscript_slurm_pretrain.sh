@@ -43,6 +43,11 @@ mkdir -p "${HF_HOME}" "${HF_HUB_CACHE}"
 
 export CUBLAS_WORKSPACE_CONFIG=":4096:8"
 
+# ── Crop scale ────────────────────────────────────────────────────────────────
+# Both ROI-centered and random crops sample scale from [MIN_CROP_SCALE, 1.0].
+# Set via MIN_CROP_SCALE env var from submit_best_model.sh.
+MIN_CROP_SCALE="${MIN_CROP_SCALE:-0.4}"
+
 # ── Paths ─────────────────────────────────────────────────────────────────────
 RUN_TAG="best_model"
 WANDB_GROUP="best_model"
@@ -79,8 +84,7 @@ python train.py \
     --roi-negative-focus-prob 0.0 \
     --roi-warmup-epochs 5 \
     --roi-context-scale 2.0 \
-    --roi-min-crop-scale 0.4 \
-    --roi-max-crop-scale 1.0 \
+    --roi-min-crop-scale "${MIN_CROP_SCALE}" \
     --roi-center-jitter 0.05 \
     --roi-max-aspect-ratio 1.5 \
     --roi-records-path "./roi_records/rois.json" \

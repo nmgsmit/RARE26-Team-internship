@@ -244,7 +244,14 @@ class TwoViewDataset(Dataset):
         return image.crop((left, top, left + crop_w, top + crop_h))
 
     def _build_view(self, image, use_roi, roi_record):
-        """Build one view: ROI crop (if use_roi and record available) or random crop."""
+        """Build one view: ROI crop (if use_roi and record available) or random crop.
+
+        Both branches sample scale uniformly from [roi_min_crop_scale, 1.0].
+        The only difference is where the crop is centred:
+          - ROI crop:    centred on the lesion bbox with a small jitter
+          - Random crop: top-left corner drawn uniformly over all valid positions
+        This holds regardless of whether roi_guidance_active is True or False.
+        """
         if use_roi and roi_record is not None:
             selected = self._select_roi_record(roi_record)
             jitter_xy = self._sample_jitter()
@@ -258,11 +265,8 @@ class TwoViewDataset(Dataset):
                 max_aspect_ratio=self.roi_max_aspect_ratio,
             )
             return self.roi_transform2(crop)
-        # Random crop: use full scale range when ROI guidance is active, else near-full
-        if self.roi_guidance_active:
-            crop = self._random_full_image_crop_fixed_scale(image, self.roi_min_crop_scale, self.roi_max_crop_scale)
-        else:
-            crop = self._random_full_image_crop_fixed_scale(image, 0.9, 1.0)
+        # Random crop: same scale range [min, 1.0], uniform position
+        crop = self._random_full_image_crop_fixed_scale(image, self.roi_min_crop_scale, 1.0)
         return self.transform1(crop)
 
     def __getitem__(self, idx):

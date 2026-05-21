@@ -3,9 +3,13 @@
 # Pretrain runs first; the four finetune heads start automatically once it succeeds.
 #
 # Usage:
-#   bash submit_best_model.sh
+#   bash submit_best_model.sh                        # default min crop scale 0.4
+#   MIN_CROP_SCALE=0.6 bash submit_best_model.sh     # larger minimum crop
 #
-# Optional overrides:
+# Both ROI-centered and random crops sample scale uniformly from
+# [MIN_CROP_SCALE, 1.0].  Only the crop centre differs between the two types.
+#
+# Other optional overrides:
 #   PARTITION=gpu_h100 bash submit_best_model.sh
 #   PRETRAIN_TIME=48:00:00 bash submit_best_model.sh
 
@@ -15,7 +19,9 @@ PARTITION="${PARTITION:-gpu_a100}"
 PRETRAIN_TIME="${PRETRAIN_TIME:-24:00:00}"
 FINETUNE_TIME="${FINETUNE_TIME:-16:00:00}"
 
-echo "Submitting pretrain job..."
+export MIN_CROP_SCALE="${MIN_CROP_SCALE:-0.4}"
+
+echo "Submitting pretrain job (crop scale range [${MIN_CROP_SCALE}, 1.0])..."
 PRETRAIN_JOB_ID=$(sbatch \
     --parsable \
     --partition="${PARTITION}" \
