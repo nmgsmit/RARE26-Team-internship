@@ -486,6 +486,16 @@ def get_args_parser():
         help="Disable balanced sampling (overrides the LOCO auto-enable).",
     )
     parser.add_argument(
+        "--pos-ratio",
+        type=float,
+        default=0.5,
+        help=(
+            "Fraction of each mini-batch that is positive when --balanced-sampler is active. "
+            "Default is 0.5 (50/50). For SupPro, consider 0.2 to avoid over-exposing the "
+            "minority class; the in-batch class weights in suppro_loss correct for this skew."
+        ),
+    )
+    parser.add_argument(
         "--suppro-roi",
         action="store_true",
         help=(
@@ -819,10 +829,8 @@ def resolve_runtime_config(args):
             )
         else:
             args.balanced_sampler = False
-    if args.balanced_sampler and args.batch_size % 2 != 0:
-        raise ValueError(
-            f"--balanced-sampler requires an even --batch-size, got {args.batch_size}."
-        )
+    if not 0.0 < args.pos_ratio < 1.0:
+        raise ValueError(f"--pos-ratio must be in (0, 1), got {args.pos_ratio}.")
     if args.suppro_roi and args.stage != "pretrain":
         raise ValueError("--suppro-roi is only supported for --stage pretrain.")
     if args.suppro_roi and args.loss_name != "suppro":
@@ -1234,7 +1242,7 @@ def _run_main_body(args):
             f"roi path={args.roi_records_path} | "
             f"weight={args.suppro_roi_weight} | "
             f"warmup epochs={args.suppro_roi_warmup_epochs} | "
-            f"balanced_sampler={bool(args.balanced_sampler)}"
+            f"balanced_sampler={bool(args.balanced_sampler)} pos_ratio={args.pos_ratio}"
         )
     if args.hard_neg_roi_records_path:
         print(

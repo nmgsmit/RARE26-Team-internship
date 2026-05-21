@@ -496,17 +496,20 @@ class SupproROIDataset(Dataset):
 
 
 class BalancedBatchSampler(BatchSampler):
-    def __init__(self, labels, batch_size, drop_last=False, generator=None):
+    def __init__(self, labels, batch_size, pos_ratio=0.5, drop_last=False, generator=None):
         if batch_size <= 0:
             raise ValueError(f"batch_size must be > 0, got {batch_size}.")
-        if batch_size % 2 != 0:
-            raise ValueError(
-                f"BalancedBatchSampler requires an even batch size, got {batch_size}."
-            )
+        if not 0.0 < pos_ratio < 1.0:
+            raise ValueError(f"pos_ratio must be in (0, 1), got {pos_ratio}.")
 
         self.batch_size = int(batch_size)
+        self.n_pos = max(1, round(batch_size * pos_ratio))
+        self.n_neg = self.batch_size - self.n_pos
+        if self.n_neg < 1:
+            raise ValueError(
+                f"pos_ratio={pos_ratio} with batch_size={batch_size} leaves no room for negatives."
+            )
         self.drop_last = bool(drop_last)
-        self.half_batch_size = self.batch_size // 2
         self.generator = generator
         self.positive_indices = [
             index for index, label in enumerate(labels) if int(label) == 1
@@ -538,7 +541,7 @@ class BalancedBatchSampler(BatchSampler):
 
         for _ in range(self.num_batches):
             pos_indices = []
-            for _ in range(self.half_batch_size):
+            for _ in range(self.n_pos):
                 if pos_ptr >= len(pos_pool):
                     pos_pool = pos_tensor[torch.randperm(len(pos_tensor), generator=self.generator)]
                     pos_ptr = 0
@@ -546,7 +549,7 @@ class BalancedBatchSampler(BatchSampler):
                 pos_ptr += 1
 
             neg_indices = []
-            for _ in range(self.half_batch_size):
+            for _ in range(self.n_neg):
                 if neg_ptr >= len(neg_pool):
                     neg_pool = neg_tensor[torch.randperm(len(neg_tensor), generator=self.generator)]
                     neg_ptr = 0
@@ -818,6 +821,7 @@ def prepare_datasets(args, device):
             batch_sampler=BalancedBatchSampler(
                 labels=train_df["label"].tolist(),
                 batch_size=args.batch_size,
+                pos_ratio=getattr(args, "pos_ratio", 0.5),
                 generator=train_generator,
             ),
             num_workers=args.num_workers,
