@@ -1425,8 +1425,34 @@ def _run_main_body(args):
 
         print(f"Class mapping: {class_names}")
         print("Training finished! Check your WandB dashboard.")
+
+        # Build fold result so LOCO ensembling works for sklearn heads too.
+        predictions_path = os.path.join(
+            args.save_dir, f"{args.experiment_id}_val_predictions.npz"
+        )
+        np.savez(
+            predictions_path,
+            val_targets=np.asarray(valid_targets, dtype=np.int64),
+            val_scores=np.asarray(valid_scores, dtype=np.float32),
+            fold_index=int(getattr(args, "fold_index", 0)),
+        )
+        sklearn_fold_result = {
+            "fold_index": int(getattr(args, "fold_index", 0)),
+            "experiment_id": args.experiment_id,
+            # sklearn writes only final_save_path; use it as best_save_path too
+            # so the ensemble loader finds a valid checkpoint.
+            "best_save_path": final_save_path,
+            "final_save_path": final_save_path,
+            "val_predictions_path": predictions_path,
+            "val_targets": valid_targets,
+            "val_scores": valid_scores,
+            "val_metrics": valid_metrics,
+            "val_projected_metrics": valid_projected_metrics,
+            "checkpoint_model_config": checkpoint_model_config,
+            "class_names": class_names,
+        }
         wandb.finish()
-        return
+        return sklearn_fold_result
 
     for epoch in range(args.epochs):
         # Update dataset's current epoch (for ROI warmup control)
