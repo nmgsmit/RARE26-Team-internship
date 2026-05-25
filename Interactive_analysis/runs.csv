@@ -1,0 +1,63 @@
+experiment_id,model finetune,phase,backbone,temp,backbone_lr,proj_lr,class_lr,batch_size,loss,Crop scale,Balanced Sampling,Head type,Crop type,notes
+P0_Base_ResNet50_1e-3_t1,Base_ResNet50_1e-3_t1_baseline_best.pt,0_backbone,ResNet50,0.07,1e-03,3e-4,3e-4,32,Cross-Entropy,0.6,,Linear,Random,Baseline for Resnet
+P0_Base_GastroSimCLR_1e-3_t1,Base_GastroSimCLR_1e-3_t1_baseline_best.pt,0_backbone,RN50 GastroSimCLR,0.07,1e-03,3e-4,3e-4,32,Cross-Entropy,0.6,,Linear,Random,Baseline for GastroSimCLR
+P0_Base_GastronetDinoV2_1e-3_t1,Base_GastronetDinoV2_1e-3_t1_baseline_best.pt,0_backbone,ViT GastroNet DINOv2,0.07,1e-03,3e-4,3e-4,32,Cross-Entropy,0.6,,Linear,Random,Baseline for Gastronet DINOv2
+P0_Base_GastroMoCO_1e-3_t1,Base_GastroMoCO_1e-3_t1_baseline_best.pt,0_backbone,RN50 GastroMoCO,0.07,1e-03,3e-4,3e-4,32,Cross-Entropy,0.6,,Linear,Random,Baseline for GastroMoCo
+P0_Base_DinoV3_1e-3_t1,Base_DinoV3_1e-3_t1_baseline_best.pt,0_backbone,ViT DINOv3,0.07,1e-03,3e-4,3e-4,32,Cross-Entropy,0.6,,Linear,Random,Baseline for DINOv3
+P1_BB_GastronetDinoV2_t1,P1_BB_GastronetDinoV2_t1_finetune_best.pt,1_backbone,ViT GastroNet DINOv2,0.07,1e-05,3e-4,3e-4,32,SupPro,0.6,,Linear,Random,Base
+P1_BB_DinoV3_t1,P1_BB_DinoV3_t1_finetune_best.pt,1_backbone,ViT DINOv3,0.07,1e-05,3e-4,3e-4,32,SupPro,0.6,,Linear,Random,
+P1_BB_GastroMoCO_t1,P1_BB_GastroMoCO_t1_finetune_best.pt,1_backbone,RN50 GastroMoCO,0.07,1e-05,3e-4,3e-4,32,SupPro,0.6,,Linear,Random,
+P1_BB_GastroSimCLR_t1,P1_BB_GastroSimCLR_t1_finetune_best.pt,1_backbone,RN50 GastroSimCLR,0.07,1e-05,3e-4,3e-4,32,SupPro,0.6,,Linear,Random,
+P1_BB_ResNet50_t1,P1_BB_ResNet50_t1_finetune_best.pt,1_backbone,ResNet50,0.07,1e-05,3e-4,3e-4,32,SupPro,0.6,,Linear,Random,
+P2_Temp_0.07_t1,P2_Temp_0.07_t1_finetune_best.pt,2_temperature,ViT GastroNet DINOv2,0.07,1e-05,3e-4,3e-4,32,SupPro,0.6,,Linear,Random,
+P2_Temp_0.1_t1,P2_Temp_0.1_t1_finetune_best.pt,2_temperature,ViT GastroNet DINOv2,0.1,1e-05,3e-4,3e-4,32,SupPro,0.6,,Linear,Random,Base
+P2_Temp_0.3_t1,P2_Temp_0.3_t1_finetune_best.pt,2_temperature,ViT GastroNet DINOv2,0.3,1e-05,3e-4,3e-4,32,SupPro,0.6,,Linear,Random,
+P2_Temp_0.5_t1,P2_Temp_0.5_t1_finetune_best.pt,2_temperature,ViT GastroNet DINOv2,0.5,1e-05,3e-4,3e-4,32,SupPro,0.6,,Linear,Random,Base
+P3_BBLR_1e-5_t1,P3_BBLR_1e-5_t1_finetune_best.pt,3a_backbone_lr,ViT GastroNet DINOv2,0.1,1e-05,3e-4,3e-4,32,SupPro,0.6,,Linear,Random,
+P3_BBLR_1e-6_t1,P3_BBLR_1e-6_t1_finetune_best.pt,3a_backbone_lr,ViT GastroNet DINOv2,0.1,1e-06,3e-4,3e-4,32,SupPro,0.6,,Linear,Random,
+P3_BBLR_1e-4_t1,P3_BBLR_1e-4_t1_finetune_best.pt,3a_backbone_lr,ViT GastroNet DINOv2,0.1,1e-4,3e-4,3e-4,32,SupPro,0.6,,Linear,Random,
+P3_BBLR_1e-7_t1,P3_BBLR_1e-7_t1_finetune_best.pt,3a_backbone_lr,ViT GastroNet DINOv2,0.1,1e-7,3e-4,3e-4,32,SupPro,0.6,,Linear,Random,
+P3_BBLR_1e-3_t1,P3_BBLR_1e-3_t1_finetune_best.pt,3a_backbone_lr,ViT GastroNet DINOv2,0.1,1e-3,3e-4,3e-4,32,SupPro,0.6,,Linear,Random,
+P3_ProjLR_3e-4_t1,P3_ProjLR_3e-4_t1_finetune_best.pt,3b_proj_lr,ViT GastroNet DINOv2,0.1,1e-05,3e-4,3e-4,32,SupPro,0.6,,Linear,Random,
+P3_ProjLR_3e-5_t1,P3_ProjLR_3e-5_t1_finetune_best.pt,3b_proj_lr,ViT GastroNet DINOv2,0.1,1e-05,3e-5,3e-4,32,SupPro,0.6,,Linear,Random,
+P3_ProjLR_3e-3_t1,P3_ProjLR_3e-3_t1_finetune_best.pt,3b_proj_lr,ViT GastroNet DINOv2,0.1,1e-05,3e-3,3e-4,32,SupPro,0.6,,Linear,Random,Base
+P3_ClassLR_3e-2_t1,P3_ClassLR_3e-2_t1_finetune_best.pt,3c_class_lr,ViT GastroNet DINOv2,0.1,1e-05,3e-4,3e-2,32,SupPro,0.6,,Linear,Random,Base
+P3_ClassLR_3e-5_t1,P3_ClassLR_3e-5_t1_finetune_best.pt,3c_class_lr,ViT GastroNet DINOv2,0.1,1e-05,3e-4,3e-5,32,SupPro,0.6,,Linear,Random,
+P3_ClassLR_3e-3_t1,P3_ClassLR_3e-3_t1_finetune_best.pt,3c_class_lr,ViT GastroNet DINOv2,0.1,1e-05,3e-4,3e-3,32,SupPro,0.6,,Linear,Random,
+P3_ClassLR_3e-6_t1,P3_ClassLR_3e-6_t1_finetune_best.pt,3c_class_lr,ViT GastroNet DINOv2,0.1,1e-05,3e-4,3e-6,32,SupPro,0.6,,Linear,Random,
+P3_ClassLR_3e-4_t1,P3_ClassLR_3e-4_t1_finetune_best.pt,3c_class_lr,ViT GastroNet DINOv2,0.1,1e-05,3e-4,3e-4,32,SupPro,0.6,,Linear,Random,
+P4_Batch_32_t1,P4_Batch_32_t1_finetune_best.pt,4_batch_size,ViT GastroNet DINOv2,0.1,1e-05,3e-4,3e-4,32,SupPro,0.6,,Linear,Random,
+P4_Batch_4_t1,P4_Batch_4_t1_finetune_best.pt,4_batch_size,ViT GastroNet DINOv2,0.1,1e-05,3e-4,3e-4,4,SupPro,0.6,,Linear,Random,
+P4_Batch_8_t1,P4_Batch_8_t1_finetune_best.pt,4_batch_size,ViT GastroNet DINOv2,0.1,1e-05,3e-4,3e-4,8,SupPro,0.6,,Linear,Random,
+P4_Batch_16_t1,P4_Batch_16_t1_finetune_best.pt,4_batch_size,ViT GastroNet DINOv2,0.1,1e-05,3e-4,3e-4,16,SupPro,0.6,,Linear,Random,
+P5_pro1_min0_t1,P5_pro1_min0_t1_finetune_best.pt,5_loss_mix,ViT GastroNet DINOv2,0.1,1e-05,3e-4,3e-4,32,SupPro 1.0 / SupMin 0.0,0.6,,Linear,Random,
+P5_pro0_min1_t1,P5_pro0_min1_t1_finetune_best.pt,5_loss_mix,ViT GastroNet DINOv2,0.1,1e-05,3e-4,3e-4,32,SupPro 0.0 / SupMin 1.0,0.6,,Linear,Random,
+P5_pro05_min05_t1,P5_pro05_min05_t1_finetune_best.pt,5_loss_mix,ViT GastroNet DINOv2,0.1,1e-05,3e-4,3e-4,32,SupPro 0.5 / SupMin 0.5,0.6,,Linear,Random,
+P5_pro025_min075_t1,P5_pro025_min075_t1_finetune_best.pt,5_loss_mix,ViT GastroNet DINOv2,0.1,1e-05,3e-4,3e-4,32,SupPro 0.25 / SupMin 0.75,0.6,,Linear,Random,
+P5_pro075_min025_t1,P5_pro075_min025_t1_finetune_best.pt,5_loss_mix,ViT GastroNet DINOv2,0.1,1e-05,3e-4,3e-4,32,SupPro 0.75 / SupMin 0.25,0.6,,Linear,Random,
+P5_pro09_min01_t1,P5_pro09_min01_t1_finetune_best.pt,5_loss_mix,ViT GastroNet DINOv2,0.1,1e-05,3e-4,3e-4,32,SupPro 0.9 / SupMin 0.1,0.6,,Linear,Random,
+P5_pro01_min09_t1,P5_pro01_min09_t1_finetune_best.pt,5_loss_mix,ViT GastroNet DINOv2,0.1,1e-05,3e-4,3e-4,32,SupPro 0.1 / SupMin 0.9,0.6,,Linear,Random,
+P6_BalSam_50_Linear,ftopt_balsam_p50_f50_gastronet_bs32_suppro_lp_linear_u0_finetune_best.pt,6 (Balanced Sampling),ViT Gastronet DinoV2,0.1,1e-05,3e-4,3e-4,32,SupPro,0.6,50%,Linear,Random,
+P6_BalSam_25_Linear,ftopt_balsam_p25_f25_gastronet_bs32_suppro_lp_linear_u0_finetune_best.pt,6 (Balanced Sampling),ViT Gastronet DinoV2,0.1,1e-05,3e-4,3e-4,32,SupPro,0.6,25%,Linear,Random,
+P6_BalSam_05_Linear,ftopt_balsam_p05_f05_gastronet_bs32_suppro_lp_linear_u0_finetune_best.pt,6 (Balanced Sampling),ViT Gastronet DinoV2,0.1,1e-05,3e-4,3e-4,32,SupPro,0.6,5%,Linear,Random,
+P7_ROI_crop04,roi_0.4_finetune_best.pt,7 (Crop Scale),ViT Gastronet DinoV2,0.1,1e-05,3e-4,3e-4,32,SupPro,0.4,50%,Linear,ROI,
+P7_Random_crop04,random_0.4_finetune_best.pt,7 (Crop Scale),ViT Gastronet DinoV2,0.1,1e-05,3e-4,3e-4,32,SupPro,0.4,50%,Linear,Random,
+P7_ROI_crop08_REAL,roi_0.8_finetune_best.pt,7 (Crop Scale),ViT Gastronet DinoV2,0.1,1e-05,3e-4,3e-4,32,SupPro,0.8,50%,Linear,ROI,
+P7_Random_crop08,random_0.8_finetune_best.pt,7 (Crop Scale),ViT Gastronet DinoV2,0.1,1e-05,3e-4,3e-4,32,SupPro,0.8,50%,Linear,Random,
+P7_Random_crop1,random_1.0_finetune_best.pt,7 (Crop Scale),ViT Gastronet DinoV2,0.1,1e-05,3e-4,3e-4,32,SupPro,1,50%,Linear,Random (irrelevant),
+P8_scale04_finetune_knn,P8_scale04_finetune_knn_submission.pt,8 (classification head),ViT Gastronet DinoV2,0.1,1e-05,3e-4,2e-4,32 (6pos+26neg),SupPro,"[0.4, 1.0]",Yes 20/80,KNN,50/50 ROI+Random,
+P8_scale04_finetune_linear,P8_scale04_finetune_linear_submission.pt,8 (classification head),ViT Gastronet DinoV2,0.1,1e-05,3e-4,2e-4,32 (6pos+26neg),SupPro,"[0.4, 1.0]",Yes 20/80,Linear,50/50 ROI+Random,
+P8_scale04_finetune_svm,P8_scale04_finetune_svm_submission.pt,8 (classification head),ViT Gastronet DinoV2,0.1,1e-05,3e-4,2e-4,32 (6pos+26neg),SupPro,"[0.4, 1.0]",Yes 20/80,SVM,50/50 ROI+Random,
+P8_scale04_finetune_mlp_fullwidth,P8_scale04_finetune_mlp_fullwidth_submission.pt,8 (classification head),ViT Gastronet DinoV2,0.1,1e-05,3e-4,2e-4,32 (6pos+26neg),SupPro,"[0.4, 1.0]",Yes 20/80,MLP,50/50 ROI+Random,
+P8_scale06_finetune_knn,P8_scale06_finetune_knn_submission.pt,8 (classification head),ViT Gastronet DinoV2,0.1,1e-05,3e-4,2e-4,32 (6pos+26neg),SupPro,"[0.6, 1.0]",Yes 20/80,KNN,50/50 ROI+Random,
+P8_scale06_finetune_linear,P8_scale06_finetune_linear_submission.pt,8 (classification head),ViT Gastronet DinoV2,0.1,1e-05,3e-4,2e-4,32 (6pos+26neg),SupPro,"[0.6, 1.0]",Yes 20/80,Linear,50/50 ROI+Random,
+P8_scale06_finetune_svm,P8_scale06_finetune_svm_submission.pt,8 (classification head),ViT Gastronet DinoV2,0.1,1e-05,3e-4,2e-4,32 (6pos+26neg),SupPro,"[0.6, 1.0]",Yes 20/80,SVM,50/50 ROI+Random,
+P8_scale06_finetune_mlp_fullwidth,P8_scale06_finetune_mlp_fullwidth_submission.pt,8 (classification head),ViT Gastronet DinoV2,0.1,1e-05,3e-4,2e-4,32 (6pos+26neg),SupPro,"[0.6, 1.0]",Yes 20/80,MLP,50/50 ROI+Random,
+P8_scale08_finetune_knn,P8_scale08_finetune_knn_submission.pt,8 (classification head),ViT Gastronet DinoV2,0.1,1e-05,3e-4,2e-4,32 (6pos+26neg),SupPro,"[0.8, 1.0]",Yes 20/80,KNN,50/50 ROI+Random,
+P8_scale08_finetune_linear,P8_scale08_finetune_linear_submission.pt,8 (classification head),ViT Gastronet DinoV2,0.1,1e-05,3e-4,2e-4,32 (6pos+26neg),SupPro,"[0.8, 1.0]",Yes 20/80,Linear,50/50 ROI+Random,
+P8_scale08_finetune_svm,P8_scale08_finetune_svm_submission.pt,8 (classification head),ViT Gastronet DinoV2,0.1,1e-05,3e-4,2e-4,32 (6pos+26neg),SupPro,"[0.8, 1.0]",Yes 20/80,SVM,50/50 ROI+Random,
+P8_scale08_finetune_mlp_fullwidth,P8_scale08_finetune_mlp_fullwidth_submission.pt,8 (classification head),ViT Gastronet DinoV2,0.1,1e-05,3e-4,2e-4,32 (6pos+26neg),SupPro,"[0.8, 1.0]",Yes 20/80,MLP,50/50 ROI+Random,
+P8_scale095_finetune_knn,P8_scale095_finetune_knn_submission.pt,8 (classification head),ViT Gastronet DinoV2,0.1,1e-05,3e-4,2e-4,32 (6pos+26neg),SupPro,"[0.95, 1.0]",Yes 20/80,KNN,50/50 ROI+Random,
+P8_scale095_finetune_linear,P8_scale095_finetune_linear_submission.pt,8 (classification head),ViT Gastronet DinoV2,0.1,1e-05,3e-4,2e-4,32 (6pos+26neg),SupPro,"[0.95, 1.0]",Yes 20/80,Linear,50/50 ROI+Random,
+P8_scale095_finetune_svm,P8_scale095_finetune_svm_submission.pt,8 (classification head),ViT Gastronet DinoV2,0.1,1e-05,3e-4,2e-4,32 (6pos+26neg),SupPro,"[0.95, 1.0]",Yes 20/80,SVM,50/50 ROI+Random,
+P8_scale095_finetune_mlp_fullwidth,P8_scale095_finetune_mlp_fullwidth_submission.pt,8 (classification head),ViT Gastronet DinoV2,0.1,1e-05,3e-4,2e-4,32 (6pos+26neg),SupPro,"[0.95, 1.0]",Yes 20/80,MLP,50/50 ROI+Random,
