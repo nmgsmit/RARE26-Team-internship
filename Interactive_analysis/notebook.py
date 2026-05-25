@@ -2,7 +2,7 @@
 Stage 4: interactive UMAP/PCA notebook (marimo).
 
 Run with:
-    marimo edit notebook.py
+    marimo run notebook.py
 
 Reads from features_out/<checkpoint_name>/ produced by extract_features.py.
 Select MULTIPLE feature folders to merge them on the same plot.

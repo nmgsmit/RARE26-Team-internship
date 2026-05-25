@@ -3,7 +3,7 @@
 This repo evaluates learned representations from SupPro/SupMin/Baseline
 checkpoints. The intended flow is:
 
-1. Inspect the raw dataset with `notebook_dataexploration.py`.
+1. Inspect the raw dataset with `notebook_data.py`.
 2. Use `runs.csv` plus the checkpoint folders to extract features.
 3. Share or download the resulting `features_out/` directory.
 4. Run the interactive and static notebooks for UMAP-style exploration.
@@ -25,7 +25,7 @@ with `--device mps`. CPU is the default fallback.
 Before touching the model checkpoints, open the raw dataset notebook:
 
 ```bash
-marimo run notebook_dataexploration.py
+marimo run notebook_data.py
 ```
 
 This notebook is meant to inspect the raw images and answer questions such as:
@@ -34,14 +34,6 @@ This notebook is meant to inspect the raw images and answer questions such as:
 - how the training centers are distributed
 - whether the image sizes, aspect ratios, or color statistics differ across centers
 - what the raw images look like before any model sees them
-
-If a OneDrive link is available for the shared raw data or shared features,
-add it here and point people to the download location, for example:
-
-- OneDrive download link: [paste link here](PASTE_LINK_HERE)
-
-If not, the repo expects the raw inputs to live in the local paths configured
-in `notebook_dataexploration.py` and `extract_features.py`.
 
 ## 2. Understand `runs.csv`
 
@@ -89,6 +81,9 @@ update the configuration block at the bottom of `extract_features.py`.
 
 ## 4. Extract features
 
+You dont have to extract the features manually, this can also be done by downloading it from Onedrive in our shared Rare26 team intership folder. Saves a lot of time!
+
+
 ```bash
 python extract_features.py
 ```
@@ -128,7 +123,7 @@ shareable, less reactive version of the same analysis.
 
 ## Nice-to-know points
 
-- `notebook_dataexploration.py` is the best place to sanity-check the raw
+-- `notebook_data.py` is the best place to sanity-check the raw
   dataset before model evaluation.
 - `extract_features.py` can process multiple checkpoints from `runs.csv` in one
   run.
@@ -142,7 +137,7 @@ shareable, less reactive version of the same analysis.
 ## File map
 
 ```text
-notebook_dataexploration.py  Raw dataset exploration
+notebook_data.py  Raw dataset exploration
 extract_features.py          Feature extraction from checkpoints
 notebook.py                  Interactive UMAP notebook
 notebook_static.py           Static UMAP notebook

@@ -1,12 +1,15 @@
 """
 Stage 0: raw image / dataset analysis (marimo).
 
+Run with:
+    marimo run notebook_data.py
+
 Looks at the data BEFORE any model touches it.
 """
 
 import marimo
 
-__generated_with = "0.23.5"
+__generated_with = "0.23.6"
 app = marimo.App(width="medium")
 
 

@@ -1,7 +1,7 @@
 """
 Static comparison notebook (marimo).
 Run with:
-    marimo edit notebook_static.py
+    marimo run notebook_static.py
 
 Non-interactive: every figure is hardcoded. For each experiment we load
 *both* the `__evc_test` and `__train_all` folders, project the **projection
