@@ -5,22 +5,49 @@
 **View 1:** Random crop at scale uniform(0.9, 1.0)
 
 **View 2:** 
-- Positive with ROI: ROI crop at scale uniform(roi_min_crop_scale, 1.0) + jitter
-- Positive without ROI: Random crop at scale uniform(0.9, 1.0)
-- Negative with ROI: Negative ROI crop at scale uniform(roi_min_crop_scale, 1.0) + jitter
-- Negative without ROI: Random crop at scale uniform(0.9, 1.0)
+- **With ROI available** (Positive or Negative): ROI crop at scale uniform(roi_min_crop_scale, 1.0) + jitter
+- **Without ROI, ROI guidance ACTIVE**: Random crop at scale uniform(roi_min_crop_scale, roi_max_crop_scale) = uniform(0.4, 1.0)
+  - Both positive and negative samples use same scale range as ROI crops (for fair comparison)
+- **Without ROI, ROI guidance INACTIVE**: Random crop at scale uniform(0.9, 1.0) (full-context)
+  - Used when no ROI records available at all
 
 ---
 
 ## Augmentation Intensity Levels
 
-| Level | H-Flip | V-Flip | Rotation | Color Jitter |
-|-------|--------|--------|----------|--------------|
-| 1 (Low) | 10% | 0% | ±2° | 0.05 |
-| 2 (Med) | 30% | 10% | ±5° | 0.08 |
-| 3 (Strong) | 50% | 20% | ±10° | 0.1 |
+| Level | Name | H-Flip | V-Flip | Rotation | Color Jitter | Use Case |
+|-------|------|--------|--------|----------|--------------|----------|
+| 1 | Low (Conservative) | 10% | 0% | ±2° | 0.05 | Light augmentation, minimal distortion |
+| 2 | Medium (Balanced) | 30% | 10% | ±5° | 0.08 | Balanced between robustness and realism |
+| 3 | Strong (Aggressive) | 50% | 20% | ±10° | 0.1 | **Default** - Good regularization |
+| 4 | Extreme (Very Aggressive) | 50% | 50% | ±45° | 0.2 | Hard augmentation studies, stress testing |
 
-Set via: `export AUGMENTATION_INTENSITY=1` (default: 3)
+**ROI-Specific Augmentation:** ROI crops use lighter augmentation than full-frame crops (especially rotation and color jitter).
+
+Set via: `export AUGMENTATION_INTENSITY=3` (default: 3)
+
+### Detailed Augmentation Parameters
+
+Full parameter sets for each intensity level (from `data.py` AUGMENTATION_PRESETS):
+
+| Parameter | Level 1 | Level 2 | Level 3 | Level 4 |
+|-----------|---------|---------|---------|---------|
+| **Full-Frame Augmentation** | | | | |
+| Horizontal Flip | 0.1 | 0.3 | 0.5 | 0.5 |
+| Vertical Flip | 0.0 | 0.1 | 0.2 | 0.5 |
+| Rotation Range | ±2° | ±5° | ±10° | ±45° |
+| Brightness Jitter | 0.05 | 0.08 | 0.1 | 0.2 |
+| Contrast Jitter | 0.05 | 0.08 | 0.1 | 0.2 |
+| Saturation Jitter | 0.05 | 0.08 | 0.1 | 0.2 |
+| Hue Jitter | 0.01 | 0.015 | 0.02 | 0.03 |
+| **ROI-Specific Augmentation** | | | | |
+| Rotation Range | ±2° | ±3° | ±5° | ±15° |
+| Brightness Jitter | 0.02 | 0.03 | 0.03 | 0.05 |
+| Contrast Jitter | 0.02 | 0.03 | 0.03 | 0.05 |
+| Saturation Jitter | 0.02 | 0.03 | 0.03 | 0.05 |
+| Hue Jitter | 0.003 | 0.005 | 0.005 | 0.007 |
+
+**Note:** ROI crops intentionally use lighter augmentation than full-frame crops to preserve the ROI region details while still providing some regularization.
 
 ---
 
@@ -28,7 +55,7 @@ Set via: `export AUGMENTATION_INTENSITY=1` (default: 3)
 
 | Parameter | Environment Variable | Argument | Default | Range |
 |-----------|---------------------|----------|---------|-------|
-| Augmentation Intensity | `AUGMENTATION_INTENSITY` | `--augmentation-intensity` | 3 | 1, 2, 3 |
+| Augmentation Intensity | `AUGMENTATION_INTENSITY` | `--augmentation-intensity` | 3 | 1, 2, 3, 4 |
 | Positive ROI Probability | `ROI_FOCUS_PROB` | `--roi-focus-prob` | 1.0 | [0, 1] |
 | Negative ROI Probability | `ROI_NEGATIVE_FOCUS_PROB` | `--roi-negative-focus-prob` | 0.0 | [0, 1] |
 | ROI Warmup Epochs | `ROI_WARMUP_EPOCHS` | `--roi-warmup-epochs` | 0 | >= 0 |
