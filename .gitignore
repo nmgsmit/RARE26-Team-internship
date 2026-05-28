@@ -6,7 +6,6 @@ checkpoints/
 outputs/
 wandb/
 .env
-outputs/
 
 # Large artifacts
 *.tar
