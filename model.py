@@ -1,4 +1,19 @@
+"""Backbone + projection-head + sklearn (KNN / SVM) classifier head.
+
+Linear / MLP / cosine / residual heads were removed from this branch: the only
+supported heads are post-hoc-fit sklearn KNN and SVM, which is what the best run
+used.
+
+Backbone zoo unchanged: supports gastronet (DINOv2 ViT-B/14 reg4), DINOv3,
+SimCLR / MoCo-v2 (ResNet-50), and ImageNet ResNet-50. All checkpoint
+state-dict adapters from the original model.py are preserved so legacy
+Gastronet / SimCLR / MoCo weights still load.
+"""
+
+from __future__ import annotations
+
 import math
+import pickle
 from pathlib import Path
 
 import numpy as np
@@ -16,12 +31,12 @@ except ImportError:
     _SKLEARN_AVAILABLE = False
 
 
+# ---------------------------------------------------------------------------
+# State-dict housekeeping
+# ---------------------------------------------------------------------------
 def _unwrap_checkpoint_state_dict(checkpoint):
     if not isinstance(checkpoint, dict):
-        raise TypeError(
-            f"Expected checkpoint at load time to be a dict, got {type(checkpoint).__name__}."
-        )
-
+        raise TypeError(f"Expected dict checkpoint, got {type(checkpoint).__name__}.")
     for key in ("model_state_dict", "teacher", "state_dict", "model"):
         nested = checkpoint.get(key)
         if isinstance(nested, dict):
@@ -30,19 +45,17 @@ def _unwrap_checkpoint_state_dict(checkpoint):
 
 
 def _clean_state_dict_keys(state_dict):
-    return {
-        key.removeprefix("module."): value
-        for key, value in state_dict.items()
-    }
+    return {key.removeprefix("module."): value for key, value in state_dict.items()}
 
 
 def _normalize_classifier_head_keys(state_dict):
-    if any(key.startswith("cls_head.") for key in state_dict) and not any(
-        key.startswith("head.") for key in state_dict
+    """Old checkpoints used 'cls_head.' as the head prefix; rename to 'head.'."""
+    if any(k.startswith("cls_head.") for k in state_dict) and not any(
+        k.startswith("head.") for k in state_dict
     ):
         state_dict = {
-            (key.replace("cls_head.", "head.", 1) if key.startswith("cls_head.") else key): value
-            for key, value in state_dict.items()
+            (k.replace("cls_head.", "head.", 1) if k.startswith("cls_head.") else k): v
+            for k, v in state_dict.items()
         }
     return state_dict
 
@@ -66,31 +79,27 @@ def _infer_state_dict_backbone_prefix(state_dict):
 def _extract_backbone_state_dict(checkpoint):
     state_dict = _clean_state_dict_keys(_unwrap_checkpoint_state_dict(checkpoint))
     backbone_state = {}
-
     for key, value in state_dict.items():
         if key.startswith("backbone."):
             clean_key = key.removeprefix("backbone.")
         else:
             continue
-
         if clean_key == "register_tokens":
             clean_key = "reg_token"
         backbone_state[clean_key] = value
-
     if backbone_state:
         return backbone_state
-
-    direct_state = dict(state_dict)
-    if "register_tokens" in direct_state and "reg_token" not in direct_state:
-        direct_state["reg_token"] = direct_state.pop("register_tokens")
-    return direct_state
+    direct = dict(state_dict)
+    if "register_tokens" in direct and "reg_token" not in direct:
+        direct["reg_token"] = direct.pop("register_tokens")
+    return direct
 
 
 def _strip_extra_prefix_position_token(pos_embed):
     token_count = pos_embed.shape[1]
-    patch_only_tokens = token_count - 1
-    patch_grid = math.isqrt(patch_only_tokens)
-    if patch_grid * patch_grid == patch_only_tokens:
+    patch_only = token_count - 1
+    grid = math.isqrt(patch_only)
+    if grid * grid == patch_only:
         return pos_embed[:, 1:]
     return pos_embed
 
@@ -98,7 +107,6 @@ def _strip_extra_prefix_position_token(pos_embed):
 def _adapt_position_embeddings(backbone_state, backbone):
     if "pos_embed" not in backbone_state:
         return backbone_state
-
     pos_embed = backbone_state["pos_embed"]
     model_pos_embed = backbone.pos_embed
     if getattr(backbone, "no_embed_class", False):
@@ -106,28 +114,26 @@ def _adapt_position_embeddings(backbone_state, backbone):
         num_prefix_tokens = 0
     else:
         num_prefix_tokens = getattr(backbone, "num_prefix_tokens", 1)
-
     if pos_embed.shape != model_pos_embed.shape:
         pos_embed = resample_abs_pos_embed(
             pos_embed,
             new_size=backbone.patch_embed.grid_size,
             num_prefix_tokens=num_prefix_tokens,
         )
-
-    adapted_state = dict(backbone_state)
-    adapted_state["pos_embed"] = pos_embed
-    return adapted_state
+    adapted = dict(backbone_state)
+    adapted["pos_embed"] = pos_embed
+    return adapted
 
 
 def load_backbone_weights(backbone, checkpoint_path):
     checkpoint_path = Path(checkpoint_path)
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Backbone checkpoint not found: {checkpoint_path}")
-
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    backbone_state = _extract_backbone_state_dict(checkpoint)
-    backbone_state = _adapt_position_embeddings(backbone_state, backbone)
-
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    backbone_state = _adapt_position_embeddings(
+        _extract_backbone_state_dict(checkpoint),
+        backbone,
+    )
     incompatible = backbone.load_state_dict(backbone_state, strict=False)
     allowed_unexpected = {"mask_token"}
     unexpected = sorted(set(incompatible.unexpected_keys) - allowed_unexpected)
@@ -142,52 +148,13 @@ def load_backbone_weights(backbone, checkpoint_path):
 def extract_model_state_dict(checkpoint):
     state_dict = _unwrap_checkpoint_state_dict(checkpoint)
     if not isinstance(state_dict, dict):
-        raise TypeError(
-            f"Expected checkpoint state_dict to be a dict, got {type(state_dict).__name__}."
-        )
-    state_dict = _clean_state_dict_keys(state_dict)
-    return _normalize_classifier_head_keys(state_dict)
+        raise TypeError(f"Expected dict state_dict, got {type(state_dict).__name__}.")
+    return _normalize_classifier_head_keys(_clean_state_dict_keys(state_dict))
 
 
-def _detect_fullwidth_mlp_config(state_dict):
-    linear_layer_indices = []
-    for key in state_dict:
-        if not key.startswith("head.") or not key.endswith(".weight"):
-            continue
-        parts = key.split(".")
-        if len(parts) != 3 or parts[0] != "head" or parts[2] != "weight":
-            continue
-        if parts[1].isdigit():
-            linear_layer_indices.append(int(parts[1]))
-
-    if not linear_layer_indices:
-        return None
-
-    linear_layer_indices = sorted(linear_layer_indices)
-    first_linear_weight = state_dict[f"head.{linear_layer_indices[0]}.weight"]
-    last_linear_weight = state_dict[f"head.{linear_layer_indices[-1]}.weight"]
-    return {
-        "head_type": "mlp_fullwidth",
-        "mlp_hidden_layers": len(linear_layer_indices) - 1,
-        "mlp_hidden_dim": int(first_linear_weight.shape[0]),
-        "classifier_input_dim": int(first_linear_weight.shape[1]),
-        "mlp_dropout": 0.0,
-        "n_classes": int(last_linear_weight.shape[0]),
-    }
-
-
-def _infer_classifier_input_from_state_dict(state_dict, inferred_config):
-    proj_out_weight = state_dict.get("proj_head.2.weight")
-    if proj_out_weight is None:
-        return "pooled"
-
-    proj_dim = int(proj_out_weight.shape[0])
-    classifier_input_dim = inferred_config.get("classifier_input_dim")
-    if classifier_input_dim is None:
-        return "pooled"
-    return "projection" if int(classifier_input_dim) == proj_dim else "pooled"
-
-
+# ---------------------------------------------------------------------------
+# Config inference (KNN/SVM only on this branch)
+# ---------------------------------------------------------------------------
 def infer_backbone_input_config_from_state_dict(state_dict):
     inferred = {}
     resnet_prefix = _infer_state_dict_backbone_prefix(state_dict)
@@ -201,7 +168,6 @@ def infer_backbone_input_config_from_state_dict(state_dict):
     patch_proj = state_dict.get("backbone.patch_embed.proj.weight")
     if patch_proj is None:
         return inferred
-
     inferred["in_channels"] = int(patch_proj.shape[1])
 
     pos_embed = state_dict.get("backbone.pos_embed")
@@ -209,108 +175,57 @@ def infer_backbone_input_config_from_state_dict(state_dict):
         return inferred
 
     token_count = int(pos_embed.shape[1])
-    prefix_token_candidates = [0]
-
+    candidates = [0]
     cls_token = state_dict.get("backbone.cls_token")
     if cls_token is not None:
-        prefix_token_candidates.append(int(cls_token.shape[1]))
-
+        candidates.append(int(cls_token.shape[1]))
     reg_token = state_dict.get("backbone.reg_token")
     if reg_token is not None:
-        prefix_token_candidates.append(int(reg_token.shape[1]))
+        candidates.append(int(reg_token.shape[1]))
         if cls_token is not None:
-            prefix_token_candidates.append(int(cls_token.shape[1] + reg_token.shape[1]))
+            candidates.append(int(cls_token.shape[1] + reg_token.shape[1]))
 
     patch_grid = None
-    for prefix_tokens in prefix_token_candidates:
-        patch_token_count = token_count - prefix_tokens
-        if patch_token_count <= 0:
+    for prefix_tokens in candidates:
+        patch_tokens = token_count - prefix_tokens
+        if patch_tokens <= 0:
             continue
-        candidate_grid = math.isqrt(patch_token_count)
-        if candidate_grid * candidate_grid == patch_token_count:
+        candidate_grid = math.isqrt(patch_tokens)
+        if candidate_grid * candidate_grid == patch_tokens:
             patch_grid = candidate_grid
             break
-
     if patch_grid is None:
         return inferred
 
-    patch_height = int(patch_proj.shape[-2])
-    patch_width = int(patch_proj.shape[-1])
-    if patch_height == patch_width:
-        inferred["input_size"] = patch_grid * patch_height
-
+    patch_h = int(patch_proj.shape[-2])
+    patch_w = int(patch_proj.shape[-1])
+    if patch_h == patch_w:
+        inferred["input_size"] = patch_grid * patch_h
     return inferred
 
 
 def infer_backbone_architecture_from_state_dict(state_dict):
     if _infer_state_dict_backbone_prefix(state_dict) is not None:
-        return {
-            "backbone_name": "resnet50",
-            "pretrained": False,
-        }
+        return {"backbone_name": "resnet50", "pretrained": False}
     return {}
 
 
 def infer_model_config_from_state_dict(state_dict, checkpoint=None):
-    state_keys = set(state_dict.keys())
-
-    if "head.logit_scale" in state_keys:
-        return {
-            "head_type": "cosine_linear",
-            "classifier_input_dim": int(state_dict["head.weight"].shape[1]),
-            "n_classes": int(state_dict["head.weight"].shape[0]),
-        }
-
-    if "head.input_norm.weight" in state_keys and "head.classifier.weight" in state_keys:
-        return {
-            "head_type": "residual_bottleneck",
-            "classifier_input_dim": int(state_dict["head.up_proj.weight"].shape[1]),
-            "head_hidden_dim": int(state_dict["head.up_proj.weight"].shape[0]),
-            "head_dropout": 0.1,
-            "n_classes": int(state_dict["head.classifier.weight"].shape[0]),
-        }
-
-    if "head.net.1.weight" in state_keys and "head.net.4.weight" in state_keys:
-        return {
-            "head_type": "mlp_bottleneck",
-            "classifier_input_dim": int(state_dict["head.net.1.weight"].shape[1]),
-            "head_hidden_dim": int(state_dict["head.net.1.weight"].shape[0]),
-            "head_dropout": 0.0,
-            "n_classes": int(state_dict["head.net.4.weight"].shape[0]),
-        }
-
-    if "head.norm.weight" in state_keys and "head.classifier.weight" in state_keys:
-        return {
-            "head_type": "ln_linear",
-            "classifier_input_dim": int(state_dict["head.classifier.weight"].shape[1]),
-            "n_classes": int(state_dict["head.classifier.weight"].shape[0]),
-        }
-
-    fullwidth_mlp_config = _detect_fullwidth_mlp_config(state_dict)
-    if fullwidth_mlp_config is not None:
-        return fullwidth_mlp_config
-
-    if "head.weight" in state_keys and "head.bias" in state_keys:
-        return {
-            "head_type": "linear",
-            "classifier_input_dim": int(state_dict["head.weight"].shape[1]),
-            "n_classes": int(state_dict["head.weight"].shape[0]),
-        }
-
+    """For KNN/SVM checkpoints the head_type lives in model_config, since the
+    head itself isn't a tensor module. Other head types are not supported on
+    this branch."""
     if checkpoint and isinstance(checkpoint, dict):
-        model_config = checkpoint.get("model_config", {})
-        if isinstance(model_config, dict) and "head_type" in model_config:
-            head_type = model_config["head_type"]
+        cfg = checkpoint.get("model_config", {})
+        if isinstance(cfg, dict):
+            head_type = cfg.get("head_type")
             if head_type in ("knn", "svm"):
-                n_classes = int(model_config.get("n_classes", 2))
                 return {
                     "head_type": head_type,
-                    "n_classes": n_classes,
+                    "n_classes": int(cfg.get("n_classes", 2)),
                 }
-
     raise ValueError(
-        "Could not infer classifier head config from checkpoint state_dict. "
-        "Expected a supported head layout under the 'head.' prefix or valid model_config with head_type."
+        "Could not infer head_type from checkpoint. Expected model_config with "
+        "head_type in {'knn', 'svm'}."
     )
 
 
@@ -318,31 +233,27 @@ def resolve_model_kwargs_from_checkpoint(checkpoint, fallback_kwargs=None):
     fallback_kwargs = dict(fallback_kwargs or {})
     checkpoint_kwargs = {}
     if isinstance(checkpoint, dict):
-        raw_model_config = checkpoint.get("model_config")
-        if isinstance(raw_model_config, dict):
-            checkpoint_kwargs.update(raw_model_config)
+        raw_cfg = checkpoint.get("model_config")
+        if isinstance(raw_cfg, dict):
+            checkpoint_kwargs.update(raw_cfg)
 
     state_dict = extract_model_state_dict(checkpoint)
-    inferred_backbone_arch_kwargs = infer_backbone_architecture_from_state_dict(state_dict)
-    inferred_backbone_kwargs = infer_backbone_input_config_from_state_dict(state_dict)
-    inferred_kwargs = infer_model_config_from_state_dict(state_dict, checkpoint=checkpoint)
+    arch_kwargs = infer_backbone_architecture_from_state_dict(state_dict)
+    input_kwargs = infer_backbone_input_config_from_state_dict(state_dict)
+    head_kwargs = infer_model_config_from_state_dict(state_dict, checkpoint=checkpoint)
 
-    if "classifier_input_dim" in inferred_kwargs:
-        inferred_kwargs["classifier_input"] = _infer_classifier_input_from_state_dict(
-            state_dict, inferred_kwargs
-        )
-        inferred_kwargs.pop("classifier_input_dim", None)
-    else:
-        inferred_kwargs["classifier_input"] = "pooled"
-
-    resolved_kwargs = dict(fallback_kwargs)
-    resolved_kwargs.update(inferred_backbone_arch_kwargs)
-    resolved_kwargs.update(inferred_backbone_kwargs)
-    resolved_kwargs.update(inferred_kwargs)
-    resolved_kwargs.update(checkpoint_kwargs)
-    return resolved_kwargs
+    resolved = dict(fallback_kwargs)
+    resolved.update(arch_kwargs)
+    resolved.update(input_kwargs)
+    resolved.update(head_kwargs)
+    resolved.update(checkpoint_kwargs)
+    resolved.setdefault("classifier_input", "pooled")
+    return resolved
 
 
+# ---------------------------------------------------------------------------
+# Checkpoint save/load
+# ---------------------------------------------------------------------------
 def create_model_checkpoint(model, model_config, extra_metadata=None):
     payload = {
         "model_state_dict": model.state_dict(),
@@ -350,276 +261,143 @@ def create_model_checkpoint(model, model_config, extra_metadata=None):
     }
     if extra_metadata:
         payload.update(extra_metadata)
-
-    if hasattr(model, "is_sklearn_head") and model.is_sklearn_head:
-        if hasattr(model.head, "_fitted") and model.head._fitted:
-            import pickle
-            try:
-                payload["sklearn_head_state"] = pickle.dumps(model.head._clf)
-                print(f"[INFO] Saved fitted {model.head_type if hasattr(model, 'head_type') else 'sklearn'} head to checkpoint.")
-            except Exception as e:
-                print(f"[WARNING] Failed to pickle sklearn head: {e}")
-        else:
-            print(f"[WARNING] Model has sklearn head but it is not fitted. Checkpoint will not include sklearn_head_state.")
-
+    if model.is_sklearn_head and model.head._fitted:
+        payload["sklearn_head_state"] = pickle.dumps(model.head._clf)
     return payload
 
 
 def _adapt_encoder_proj_head_state_dict(proj_head_state, model_proj_head_state):
-    cleaned_state = _clean_state_dict_keys(proj_head_state)
+    cleaned = _clean_state_dict_keys(proj_head_state)
+    expected = set(model_proj_head_state.keys())
+    if set(cleaned.keys()) == expected:
+        return cleaned, False
 
-    expected_keys = set(model_proj_head_state.keys())
-    if set(cleaned_state.keys()) == expected_keys:
-        return cleaned_state, False
-
-    adapted_state = dict(model_proj_head_state)
-    used_source_keys = set()
-
+    adapted = dict(model_proj_head_state)
+    used = set()
     for target_key in ("0.weight", "0.bias", "2.weight", "2.bias"):
         target_tensor = model_proj_head_state[target_key]
-        if target_key in cleaned_state and cleaned_state[target_key].shape == target_tensor.shape:
-            adapted_state[target_key] = cleaned_state[target_key]
-            used_source_keys.add(target_key)
-
-    if "0.weight" not in used_source_keys:
-        for source_key, source_tensor in cleaned_state.items():
-            if (
-                source_tensor.ndim == 2
-                and source_tensor.shape == model_proj_head_state["0.weight"].shape
-            ):
-                adapted_state["0.weight"] = source_tensor
-                used_source_keys.add(source_key)
+        if target_key in cleaned and cleaned[target_key].shape == target_tensor.shape:
+            adapted[target_key] = cleaned[target_key]
+            used.add(target_key)
+    # First-layer weight fallback (any 2D tensor with the right shape)
+    if "0.weight" not in used:
+        for k, t in cleaned.items():
+            if t.ndim == 2 and t.shape == model_proj_head_state["0.weight"].shape:
+                adapted["0.weight"] = t
+                used.add(k)
                 break
-
-    if "2.weight" not in used_source_keys:
-        matching_linear_keys = [
-            source_key
-            for source_key, source_tensor in cleaned_state.items()
-            if (
-                source_tensor.ndim == 2
-                and source_tensor.shape == model_proj_head_state["2.weight"].shape
-                and source_key not in used_source_keys
-            )
+    # Last-layer weight fallback
+    if "2.weight" not in used:
+        candidates = [
+            k for k, t in cleaned.items()
+            if t.ndim == 2 and t.shape == model_proj_head_state["2.weight"].shape and k not in used
         ]
-        if matching_linear_keys:
-            adapted_state["2.weight"] = cleaned_state[matching_linear_keys[-1]]
-            used_source_keys.add(matching_linear_keys[-1])
-
-    if "0.bias" not in used_source_keys:
-        for source_key, source_tensor in cleaned_state.items():
+        if candidates:
+            adapted["2.weight"] = cleaned[candidates[-1]]
+            used.add(candidates[-1])
+    for bias_key in ("0.bias", "2.bias"):
+        if bias_key in used:
+            continue
+        for k, t in cleaned.items():
             if (
-                source_tensor.ndim == 1
-                and source_tensor.shape == model_proj_head_state["0.bias"].shape
-                and ".running_" not in source_key
-                and not source_key.endswith("num_batches_tracked")
-                and source_key not in used_source_keys
+                t.ndim == 1
+                and t.shape == model_proj_head_state[bias_key].shape
+                and ".running_" not in k
+                and not k.endswith("num_batches_tracked")
+                and k not in used
             ):
-                adapted_state["0.bias"] = source_tensor
-                used_source_keys.add(source_key)
+                adapted[bias_key] = t
+                used.add(k)
                 break
-
-    if "2.bias" not in used_source_keys:
-        for source_key, source_tensor in cleaned_state.items():
-            if (
-                source_tensor.ndim == 1
-                and source_tensor.shape == model_proj_head_state["2.bias"].shape
-                and ".running_" not in source_key
-                and not source_key.endswith("num_batches_tracked")
-                and source_key not in used_source_keys
-            ):
-                adapted_state["2.bias"] = source_tensor
-                used_source_keys.add(source_key)
-                break
-
-    successfully_adapted = (
-        adapted_state["0.weight"].shape == model_proj_head_state["0.weight"].shape
-        and adapted_state["0.bias"].shape == model_proj_head_state["0.bias"].shape
-        and adapted_state["2.weight"].shape == model_proj_head_state["2.weight"].shape
-        and adapted_state["2.bias"].shape == model_proj_head_state["2.bias"].shape
+    ok = all(
+        adapted[k].shape == model_proj_head_state[k].shape
+        for k in ("0.weight", "0.bias", "2.weight", "2.bias")
     )
-    return adapted_state, successfully_adapted
+    return adapted, ok
 
 
 def load_encoder_checkpoint(model, checkpoint_path, strict=True):
+    """Loads `backbone` + `proj_head` from a pretrain encoder.pt. Used by the
+    finetune stage to warm-start before fitting the sklearn head."""
     checkpoint_path = Path(checkpoint_path)
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Encoder checkpoint not found: {checkpoint_path}")
-
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     if not isinstance(checkpoint, dict):
-        raise TypeError(
-            f"Expected encoder checkpoint to be a dict, got {type(checkpoint).__name__}."
-        )
+        raise TypeError(f"Expected dict encoder checkpoint, got {type(checkpoint).__name__}.")
 
     backbone_state = checkpoint.get("backbone")
     proj_head_state = checkpoint.get("proj_head")
     if not isinstance(backbone_state, dict) or not isinstance(proj_head_state, dict):
-        raise ValueError(
-            "Encoder checkpoint must contain 'backbone' and 'proj_head' state dicts."
-        )
+        raise ValueError("Encoder checkpoint must contain 'backbone' and 'proj_head' state dicts.")
 
-    backbone_incompatible = model.backbone.load_state_dict(
-        _clean_state_dict_keys(backbone_state),
-        strict=strict,
+    backbone_incompat = model.backbone.load_state_dict(
+        _clean_state_dict_keys(backbone_state), strict=strict,
     )
-    model_proj_head_state = model.proj_head.state_dict()
-    adapted_proj_head_state, proj_head_adapted = _adapt_encoder_proj_head_state_dict(
-        proj_head_state,
-        model_proj_head_state,
-    )
-    proj_incompatible = model.proj_head.load_state_dict(
-        adapted_proj_head_state,
-        strict=strict,
-    )
+    model_proj_state = model.proj_head.state_dict()
+    adapted_proj_state, adapted = _adapt_encoder_proj_head_state_dict(proj_head_state, model_proj_state)
+    proj_incompat = model.proj_head.load_state_dict(adapted_proj_state, strict=strict)
 
     if strict:
-        if backbone_incompatible.missing_keys or backbone_incompatible.unexpected_keys:
+        if backbone_incompat.missing_keys or backbone_incompat.unexpected_keys:
             raise RuntimeError(
-                "Backbone weights in the encoder checkpoint are incompatible with the "
-                f"requested model. Missing keys: {backbone_incompatible.missing_keys}. "
-                f"Unexpected keys: {backbone_incompatible.unexpected_keys}."
+                f"Backbone weights incompatible. Missing: {backbone_incompat.missing_keys}. "
+                f"Unexpected: {backbone_incompat.unexpected_keys}."
             )
-        if proj_incompatible.missing_keys or proj_incompatible.unexpected_keys:
+        if proj_incompat.missing_keys or proj_incompat.unexpected_keys:
             raise RuntimeError(
-                "Projection head weights in the encoder checkpoint are incompatible with "
-                f"the requested model. Missing keys: {proj_incompatible.missing_keys}. "
-                f"Unexpected keys: {proj_incompatible.unexpected_keys}."
+                f"Projection head weights incompatible. Missing: {proj_incompat.missing_keys}. "
+                f"Unexpected: {proj_incompat.unexpected_keys}."
             )
-        if proj_head_adapted:
-            print(
-                "[INFO] Adapted legacy encoder projection-head weights to the current "
-                "projection-head architecture."
-            )
+        if adapted:
+            print("[INFO] Adapted legacy encoder projection-head weights.")
 
 
 def load_model_checkpoint(model, checkpoint_path, strict=True, map_location="cpu"):
+    """Load a full (backbone + proj_head + head + fitted sklearn) checkpoint."""
     checkpoint_path = Path(checkpoint_path)
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-
-    checkpoint = torch.load(checkpoint_path, map_location=map_location)
+    checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=False)
     if (
         isinstance(checkpoint, dict)
         and isinstance(checkpoint.get("backbone"), dict)
         and isinstance(checkpoint.get("proj_head"), dict)
         and "model_state_dict" not in checkpoint
-        and "state_dict" not in checkpoint
-        and "model" not in checkpoint
-        and "teacher" not in checkpoint
     ):
         raise ValueError(
-            "The supplied checkpoint only contains encoder weights. "
-            "Use a baseline/finetuned checkpoint for full-model loading or Grad-CAM evaluation."
+            "Checkpoint only contains encoder weights. Use a finetuned checkpoint."
         )
 
     state_dict = extract_model_state_dict(checkpoint)
-    incompatible = model.load_state_dict(state_dict, strict=strict)
-    if strict and (incompatible.missing_keys or incompatible.unexpected_keys):
+    incompat = model.load_state_dict(state_dict, strict=strict)
+    if strict and (incompat.missing_keys or incompat.unexpected_keys):
         raise RuntimeError(
-            "Checkpoint is incompatible with the requested model architecture. "
-            f"Missing keys: {incompatible.missing_keys}. "
-            f"Unexpected keys: {incompatible.unexpected_keys}."
+            f"Checkpoint incompatible. Missing: {incompat.missing_keys}. "
+            f"Unexpected: {incompat.unexpected_keys}."
         )
 
-    if hasattr(model, "is_sklearn_head") and model.is_sklearn_head:
-        if "sklearn_head_state" in checkpoint:
-            import pickle
-            try:
-                model.head._clf = pickle.loads(checkpoint["sklearn_head_state"])
-                model.head._fitted = True
-                print(f"[INFO] Successfully loaded fitted {model.head_type if hasattr(model, 'head_type') else 'sklearn'} head from checkpoint.")
-            except (pickle.UnpicklingError, RuntimeError) as e:
-                print(f"[WARNING] Failed to load sklearn head state: {e}. Head will be unfitted.")
-        else:
-            print(f"[WARNING] Model uses sklearn head but checkpoint does not contain 'sklearn_head_state'. "
-                  "Head was not fitted during training or checkpoint was not saved after fitting.")
-
-    return checkpoint, incompatible
+    if model.is_sklearn_head and "sklearn_head_state" in checkpoint:
+        model.head._clf = pickle.loads(checkpoint["sklearn_head_state"])
+        model.head._fitted = True
+    return checkpoint, incompat
 
 
-class LayerNormLinearHead(nn.Module):
-    def __init__(self, in_features, n_classes):
-        super().__init__()
-        self.norm = nn.LayerNorm(in_features)
-        self.classifier = nn.Linear(in_features, n_classes)
-
-    def forward(self, x):
-        return self.classifier(self.norm(x))
-
-
-class MLPBottleneckHead(nn.Module):
-    def __init__(self, in_features, hidden_dim, n_classes, dropout=0.0):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.LayerNorm(in_features),
-            nn.Linear(in_features, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, n_classes),
-        )
-
-    def forward(self, x):
-        return self.net(x)
-
-
-class ResidualBottleneckHead(nn.Module):
-    def __init__(self, in_features, hidden_dim, n_classes, dropout=0.1):
-        super().__init__()
-        self.input_norm = nn.LayerNorm(in_features)
-        self.up_proj = nn.Linear(in_features, hidden_dim)
-        self.activation = nn.GELU()
-        self.dropout = nn.Dropout(dropout)
-        self.down_proj = nn.Linear(hidden_dim, in_features)
-        self.output_norm = nn.LayerNorm(in_features)
-        self.classifier = nn.Linear(in_features, n_classes)
-
-    def forward(self, x):
-        residual = x
-        x = self.input_norm(x)
-        x = self.up_proj(x)
-        x = self.activation(x)
-        x = self.dropout(x)
-        x = self.down_proj(x)
-        x = self.dropout(x)
-        x = residual + x
-        x = self.output_norm(x)
-        return self.classifier(x)
-
-
-class CosineLinearHead(nn.Module):
-    def __init__(self, in_features, n_classes, init_scale=10.0):
-        super().__init__()
-        self.weight = nn.Parameter(torch.empty(n_classes, in_features))
-        self.logit_scale = nn.Parameter(torch.log(torch.tensor(float(init_scale))))
-        nn.init.normal_(self.weight, mean=0.0, std=0.02)
-
-    def forward(self, x):
-        normalized_features = F.normalize(x, dim=-1)
-        normalized_weight = F.normalize(self.weight, dim=-1)
-        scale = self.logit_scale.exp()
-        return scale * normalized_features @ normalized_weight.t()
-
-
+# ---------------------------------------------------------------------------
+# Heads
+# ---------------------------------------------------------------------------
 class SklearnKNNHead(nn.Module):
-    """k-Nearest-Neighbours classifier wrapped as an nn.Module.
-
-    forward() returns log-probabilities so that torch.softmax() and
-    torch.argmax() behave consistently with the rest of the training loop.
-    Call fit(X_numpy, y_numpy) once before using forward().
-    """
+    """k-NN classifier wrapped as an nn.Module. Returns log-probabilities so
+    softmax(log_p) == p downstream."""
 
     def __init__(self, n_neighbors=5, n_classes=2):
         super().__init__()
         if not _SKLEARN_AVAILABLE:
-            raise ImportError(
-                "scikit-learn is required for the KNN head.  "
-                "Install it with:  pip install scikit-learn"
-            )
-        self.n_neighbors = n_neighbors
-        self.n_classes = n_classes
-        self._clf = KNeighborsClassifier(n_neighbors=n_neighbors)
+            raise ImportError("scikit-learn is required for the KNN head.")
+        self.n_neighbors = int(n_neighbors)
+        self.n_classes = int(n_classes)
+        self._clf = KNeighborsClassifier(n_neighbors=self.n_neighbors)
         self._fitted = False
-        # Placeholder so state_dict() / module.parameters() work normally.
         self._dummy = nn.Parameter(torch.zeros(1), requires_grad=False)
 
     def fit(self, X, y):
@@ -628,31 +406,23 @@ class SklearnKNNHead(nn.Module):
 
     def forward(self, features):
         if not self._fitted:
-            raise RuntimeError("KNN head has not been fitted yet. Call fit() first.")
+            raise RuntimeError("KNN head not fitted. Call fit() first.")
         X = features.detach().cpu().numpy()
         proba = self._clf.predict_proba(X).astype(np.float32)
-        # softmax(log(p)) == p when p sums to 1, so all downstream code works unchanged.
         log_proba = np.log(np.clip(proba, 1e-8, 1.0))
         return torch.from_numpy(log_proba).to(device=features.device)
 
 
 class SklearnSVMHead(nn.Module):
-    """SVM classifier (RBF kernel, C=margin) wrapped as an nn.Module.
-
-    forward() returns log-probabilities (Platt-scaled via probability=True).
-    Call fit(X_numpy, y_numpy) once before using forward().
-    """
+    """RBF-kernel SVM with Platt-scaled probabilities."""
 
     def __init__(self, C=2.0, n_classes=2):
         super().__init__()
         if not _SKLEARN_AVAILABLE:
-            raise ImportError(
-                "scikit-learn is required for the SVM head.  "
-                "Install it with:  pip install scikit-learn"
-            )
-        self.C = C
-        self.n_classes = n_classes
-        self._clf = SVC(C=C, kernel="rbf", probability=True)
+            raise ImportError("scikit-learn is required for the SVM head.")
+        self.C = float(C)
+        self.n_classes = int(n_classes)
+        self._clf = SVC(C=self.C, kernel="rbf", probability=True)
         self._fitted = False
         self._dummy = nn.Parameter(torch.zeros(1), requires_grad=False)
 
@@ -662,130 +432,46 @@ class SklearnSVMHead(nn.Module):
 
     def forward(self, features):
         if not self._fitted:
-            raise RuntimeError("SVM head has not been fitted yet. Call fit() first.")
+            raise RuntimeError("SVM head not fitted. Call fit() first.")
         X = features.detach().cpu().numpy()
         proba = self._clf.predict_proba(X).astype(np.float32)
         log_proba = np.log(np.clip(proba, 1e-8, 1.0))
         return torch.from_numpy(log_proba).to(device=features.device)
 
 
-def _build_fullwidth_mlp_head(
-    in_features,
-    n_classes,
-    mlp_hidden_layers=1,
-    mlp_hidden_dim=None,
-    mlp_dropout=0.0,
-):
-    if mlp_hidden_layers < 0:
-        raise ValueError(f"mlp_hidden_layers must be >= 0, got {mlp_hidden_layers}.")
-    if not 0.0 <= mlp_dropout < 1.0:
-        raise ValueError(f"mlp_dropout must be in [0, 1), got {mlp_dropout}.")
-
-    if mlp_hidden_layers == 0:
-        return nn.Linear(in_features, n_classes), None
-
-    hidden_dim = mlp_hidden_dim or in_features
-    if hidden_dim <= 0:
-        raise ValueError(f"mlp_hidden_dim must be > 0, got {hidden_dim}.")
-
-    layers = []
-    current_dim = in_features
-    for _ in range(mlp_hidden_layers):
-        layers.append(nn.Linear(current_dim, hidden_dim))
-        layers.append(nn.GELU())
-        if mlp_dropout > 0.0:
-            layers.append(nn.Dropout(mlp_dropout))
-        current_dim = hidden_dim
-    layers.append(nn.Linear(current_dim, n_classes))
-    return nn.Sequential(*layers), hidden_dim
-
-
-def _build_classifier_head(
-    in_features,
-    n_classes,
-    head_type="mlp_fullwidth",
-    head_hidden_dim=None,
-    head_dropout=0.0,
-    mlp_hidden_layers=1,
-    mlp_hidden_dim=None,
-    mlp_dropout=0.0,
-    knn_neighbors=5,
-    svm_C=2.0,
-):
-    if head_hidden_dim is not None and head_hidden_dim <= 0:
-        raise ValueError(f"head_hidden_dim must be > 0, got {head_hidden_dim}.")
-    if not 0.0 <= head_dropout < 1.0:
-        raise ValueError(f"head_dropout must be in [0, 1), got {head_dropout}.")
-
-    if head_type == "linear":
-        head = nn.Linear(in_features, n_classes)
-        nn.init.zeros_(head.weight)
-        nn.init.zeros_(head.bias)
-        return head, "linear probe", None
-    if head_type == "ln_linear":
-        head = LayerNormLinearHead(in_features, n_classes)
-        nn.init.zeros_(head.classifier.weight)
-        nn.init.zeros_(head.classifier.bias)
-        return head, "LayerNorm + Linear", None
-    if head_type == "mlp_fullwidth":
-        head, resolved_hidden_dim = _build_fullwidth_mlp_head(
-            in_features,
-            n_classes,
-            mlp_hidden_layers=mlp_hidden_layers,
-            mlp_hidden_dim=mlp_hidden_dim,
-            mlp_dropout=mlp_dropout,
-        )
-        if mlp_hidden_layers == 0:
-            description = "linear probe"
-        else:
-            description = (
-                f"full-width MLP with {mlp_hidden_layers} hidden layer(s) "
-                f"of width {resolved_hidden_dim}"
-            )
-        return head, description, resolved_hidden_dim
-    if head_type == "mlp_bottleneck":
-        hidden_dim = head_hidden_dim or 128
-        head = MLPBottleneckHead(in_features, hidden_dim, n_classes, dropout=head_dropout)
-        return head, f"bottleneck MLP ({hidden_dim})", hidden_dim
-    if head_type == "residual_bottleneck":
-        hidden_dim = head_hidden_dim or 128
-        head = ResidualBottleneckHead(in_features, hidden_dim, n_classes, dropout=head_dropout)
-        return head, f"residual bottleneck MLP ({hidden_dim}, dropout={head_dropout})", hidden_dim
-    if head_type == "cosine_linear":
-        return CosineLinearHead(in_features, n_classes), "cosine linear head", None
+def _build_classifier_head(in_features, n_classes, head_type, knn_neighbors=5, svm_C=2.0):
     if head_type == "knn":
         k = int(knn_neighbors)
-        head = SklearnKNNHead(n_neighbors=k, n_classes=n_classes)
-        return head, f"KNN (k={k})", None
+        return SklearnKNNHead(n_neighbors=k, n_classes=n_classes), f"KNN (k={k})"
     if head_type == "svm":
         c = float(svm_C)
-        head = SklearnSVMHead(C=c, n_classes=n_classes)
-        return head, f"SVM RBF (C={c})", None
+        return SklearnSVMHead(C=c, n_classes=n_classes), f"SVM RBF (C={c})"
+    raise ValueError(
+        f"Unsupported head_type '{head_type}' on this branch. Allowed: 'knn', 'svm'."
+    )
 
-    raise ValueError(f"Unsupported head_type '{head_type}'.")
 
-
+# ---------------------------------------------------------------------------
+# Model
+# ---------------------------------------------------------------------------
 class Model(nn.Module):
+    """Backbone + projection MLP (for SupPro) + sklearn classifier head."""
+
     def __init__(
         self,
         in_channels=3,
         n_classes=2,
-        backbone_name="vit_base_patch16_dinov3.lvd1689m",
+        backbone_name="vit_base_patch14_reg4_dinov2",
         backbone_weights_path=None,
-        input_size=224,
+        input_size=336,
         freeze_backbone=False,
         pretrained=None,
         proj_dim=128,
         classifier_input="pooled",
-        head_type="mlp_fullwidth",
-        head_hidden_dim=None,
-        head_dropout=0.0,
-        mlp_hidden_layers=1,
-        mlp_hidden_dim=None,
-        mlp_dropout=0.0,
+        head_type="knn",
         knn_neighbors=5,
         svm_C=2.0,
-        **kwargs,
+        **kwargs,  # forwarded to timm.create_model
     ):
         super().__init__()
         if pretrained is None:
@@ -798,25 +484,17 @@ class Model(nn.Module):
             **kwargs,
         )
         try:
-            self.backbone = timm.create_model(
-                backbone_name,
-                img_size=input_size,
-                **backbone_kwargs,
-            )
+            self.backbone = timm.create_model(backbone_name, img_size=input_size, **backbone_kwargs)
         except TypeError as exc:
             if "img_size" not in str(exc):
                 raise
-            self.backbone = timm.create_model(
-                backbone_name,
-                **backbone_kwargs,
-            )
+            self.backbone = timm.create_model(backbone_name, **backbone_kwargs)
 
         if backbone_weights_path is not None:
             load_backbone_weights(self.backbone, backbone_weights_path)
-
         if freeze_backbone:
-            for parameter in self.backbone.parameters():
-                parameter.requires_grad = False
+            for p in self.backbone.parameters():
+                p.requires_grad = False
 
         feat_dim = getattr(self.backbone, "num_features", None)
         if feat_dim is None:
@@ -825,9 +503,7 @@ class Model(nn.Module):
         self.feat_dim = feat_dim
         self.feature_dim = feat_dim
         if classifier_input not in {"pooled", "projection"}:
-            raise ValueError(
-                f"classifier_input must be 'pooled' or 'projection', got {classifier_input!r}."
-            )
+            raise ValueError(f"classifier_input must be 'pooled' or 'projection', got {classifier_input!r}.")
         self.classifier_input = classifier_input
         self.proj_dim = int(proj_dim)
         self.proj_head = nn.Sequential(
@@ -835,25 +511,16 @@ class Model(nn.Module):
             nn.GELU(),
             nn.Linear(feat_dim, proj_dim),
         )
+
         self.head_type = head_type
-        self.classifier_hidden_layers = mlp_hidden_layers
         head_in_features = self.proj_dim if self.classifier_input == "projection" else feat_dim
-        self.head, classifier_description, resolved_hidden_dim = _build_classifier_head(
-            head_in_features,
-            n_classes,
+        self.head, classifier_description = _build_classifier_head(
+            head_in_features, n_classes,
             head_type=head_type,
-            head_hidden_dim=head_hidden_dim,
-            head_dropout=head_dropout,
-            mlp_hidden_layers=mlp_hidden_layers,
-            mlp_hidden_dim=mlp_hidden_dim,
-            mlp_dropout=mlp_dropout,
             knn_neighbors=knn_neighbors,
             svm_C=svm_C,
         )
-        self.classifier_hidden_dim = resolved_hidden_dim
-        self.classifier_description = (
-            f"{classifier_description} on {self.classifier_input} features"
-        )
+        self.classifier_description = f"{classifier_description} on {self.classifier_input} features"
 
     @property
     def cls_head(self):
@@ -870,8 +537,7 @@ class Model(nn.Module):
         return self.backbone.forward_head(tokens, pre_logits=True)
 
     def encode(self, x):
-        tokens = self.forward_tokens(x)
-        return self.pooled_features_from_tokens(tokens)
+        return self.pooled_features_from_tokens(self.forward_tokens(x))
 
     def project(self, feat):
         return F.normalize(self.proj_head(feat), dim=-1)
@@ -884,25 +550,15 @@ class Model(nn.Module):
     def classify(self, classifier_features):
         return self.head(classifier_features)
 
-    def logits_from_pooled_features(self, feat):
-        classifier_features = self.classifier_features_from_pooled(feat)
-        return self.classify(classifier_features)
-
-    def forward_from_tokens(self, tokens, return_embedding=False):
+    def forward(self, x, return_embedding=False):
+        tokens = self.forward_tokens(x)
         feat = self.pooled_features_from_tokens(tokens)
         classifier_features = self.classifier_features_from_pooled(feat)
         logits = self.classify(classifier_features)
-
         if not return_embedding:
             return logits
-
-        embedding = self.project(feat)
         return {
             "logits": logits,
-            "embedding": embedding,
+            "embedding": self.project(feat),
             "classifier_features": classifier_features,
         }
-
-    def forward(self, x, return_embedding=False):
-        tokens = self.forward_tokens(x)
-        return self.forward_from_tokens(tokens, return_embedding=return_embedding)

@@ -3,9 +3,6 @@ torchvision
 timm
 numpy
 pillow
-wandb
-scikit-learn
-tqdm
-pyyaml
 pandas
-SimpleITK
+scikit-learn>=1.4,<1.7
+wandb

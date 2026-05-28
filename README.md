@@ -1,121 +1,136 @@
-# Team Internship - AIES Master Program
+# Clean Baseline — RARE26 Team Internship
 
-This repository contains code and resources for the Team Internship project as part of the Master's program in Artificial Intelligence and Engineering Systems (AIES) at TU Eindhoven.
+Minimal, reproducible code for the best run: SupPro pretrain on Gastronet
+DINOv2 with a 20/80 balanced sampler, then post-hoc-fit sklearn KNN / SVM
+heads under LOCO + ensemble averaging.
 
----
+## Layout
 
-## Training pipeline overview
+```
+.
+├── data.py                      # Datasets, augmentation presets, LOCO/k-fold splits
+├── model.py                     # Backbone + projection MLP + SklearnKNNHead / SklearnSVMHead
+├── metrics.py                   # AUROC / AUPRC / PPV@90R / threshold + W&B log helper
+├── train.py                     # Single entry point: --stage pretrain | finetune
+├── requirements.txt
+├── README.md
+├── runscripts/
+│   ├── jobscript_slurm_pretrain.sh   # Two-fold LOCO SupPro pretrain
+│   └── jobscript_slurm_finetune.sh   # Per-fold head fit + ensemble bundle
+└── Submission_files/
+    ├── Dockerfile
+    └── predict.py               # Container entry point — handles single + ensemble checkpoints
+```
 
-Training is split into two stages: **pretrain** (contrastive, SupMin or SupPro loss) and **finetune** (supervised classifier on top of the frozen or fine-tuned backbone). A **baseline** stage (end-to-end supervised) is also available.
+## What's in / out
 
-### Example run
+**In** — only the knobs that actually moved the needle on the best run:
+
+- Backbones: Gastronet (DINOv2 ViT-B/14 reg4) + DINOv3 + SimCLR / MoCo-v2 / ResNet-50.
+- SupPro contrastive pretrain on the projection head.
+- BalancedBatchSampler with configurable `--pos-ratio` (default `0.2` = 20/80).
+- Augmentation intensity presets `1..4` (`--augmentation-intensity`).
+- LOCO leave-one-center-out CV with automatic ensemble bundling.
+- Post-hoc sklearn heads: KNN with `--knn-neighbors 5,25,51` and SVM with `--svm-C 0.5,2,10`.
+  One finetune call fits every head × hyperparameter and writes ensemble bundles.
+
+**Out** — explicitly removed:
+
+- All ROI / Grad-CAM-guided sampling machinery.
+- Linear, MLP, cosine, residual, LN-linear heads (the differentiable heads).
+- Baseline (frozen-backbone + supervised CE) stage.
+- Supervised contrastive ablations (`global-only`, `roi-aux`, …).
+- Top-block unfreeze + finetune backbone LR.
+- `--init-encoder-ckpt` warm-start.
+- Grad-CAM training/eval, hard-negative ROI, external testset code path.
+
+## End-to-end run
+
+### 1. Pretrain (one job → two LOCO encoders)
 
 ```bash
-STAGES_CSV='pretrain,finetune' \
-sbatch --export=ALL,\
-EXPERIMENT_ID=P1_BB_GastronetDinoV2_t1,\
-BACKBONES_CSV=gastronet,\
-TEMPERATURE=0.07,\
-PRETRAIN_BACKBONE_LR=1e-5,\
-PRETRAIN_PROJ_LR=3e-4,\
-FINETUNE_LR=3e-4,\
-BATCH_SIZE=32,\
-PRETRAIN_LOSS=suppro,\
-WANDB_GROUP=backbonsuppo,\
-AUGMENTATION_INTENSITY=1,\
-ROI_FOCUS_PROB=1.0,\
-ROI_NEGATIVE_FOCUS_PROB=0.0,\
-ROI_WARMUP_EPOCHS=0,\
-ROI_MIN_CROP_SCALE=0.4,\
-HEAD_TYPE="linear",\
-EXPERIMENT_SAVE_SUBDIR=report_t1 \
-jobscript_slurm.sh
+sbatch runscripts/jobscript_slurm_pretrain.sh
 ```
 
-Or locally:
+Defaults reproduce the best run: Gastronet, T=0.1, backbone LR 1e-5, projection
+LR 3e-4, batch 32, pos_ratio 0.2, aug intensity 3, 50 epochs, 2-fold LOCO.
+
+Override with env vars:
+```bash
+EXPERIMENT_ID=my_run BACKBONE_PRESET=dinov3 EPOCHS=30 \
+    sbatch runscripts/jobscript_slurm_pretrain.sh
+```
+
+Encoder checkpoints land at
+`checkpoints/<EXPERIMENT_ID>/<EXPERIMENT_ID>_pretrain_fold{0,1}/<...>_encoder.pt`.
+
+### 2. Finetune (one job → all heads + ensembles)
 
 ```bash
-python train.py \
-  --stage pretrain \
-  --loss-name suppro \
-  --experiment-id roi-suppro-balanced-v1 \
-  --backbone-preset gastronet \
-  --epochs 30 \
-  --batch-size 32 \
-  --balanced-sampler \
-  --roi-records-path ./checkpoints/roi_records/roiscroptrain.json \
-  --roi-min-crop-scale 0.6 \
-  --roi-max-crop-scale 1.0
+ENCODER_CKPTS=checkpoints/my_run/my_run_pretrain_fold0/my_run_pretrain_fold0_encoder.pt,checkpoints/my_run/my_run_pretrain_fold1/my_run_pretrain_fold1_encoder.pt \
+HEAD_TYPES=knn,svm \
+KNN_NEIGHBORS=5,25,51 \
+SVM_C=0.5,2,10 \
+EXPERIMENT_ID=my_run \
+    sbatch runscripts/jobscript_slurm_finetune.sh
 ```
 
----
-
-## Batch sampling: balanced 50/50 per batch
-
-Pass `--balanced-sampler` to enforce exactly half positives and half negatives in every mini-batch. This is especially important for SupPro pretraining where the contrastive loss is sensitive to class balance.
-
-### How it works (`BalancedBatchSampler` in `data.py`)
-
-At the **start of each epoch** the positive index pool and the negative index pool are each independently shuffled. Batches are then filled by walking through these shuffled pools sequentially — wrapping around and reshuffling when a pool is exhausted.
-
-This guarantees that every positive sample is seen either `floor(B·h / N_pos)` or `ceil(B·h / N_pos)` times per epoch (at most one apart), where `B` is the number of batches, `h = batch_size / 2`, and `N_pos` is the number of positive samples.
-
-**Why not just sample with replacement per batch?**  
-Sampling with replacement independently for every batch produces high variance: some positives may appear many times while others are never seen in an epoch. For contrastive losses this matters — stale or over-represented positives bias the embedding space.
-
----
-
-## Two-view crop augmentation
-
-During contrastive pretraining each image produces two views. Both views go through the same light augmentation pipeline (flip, rotate, colour jitter). On top of that, a **random crop** is applied to every image — positive or negative — before the augmentation transform.
-
-### Crop scale range
-
-The crop scale is sampled **independently for each view** from a uniform distribution:
+Outputs:
 
 ```
-scale ~ Uniform(roi_min_crop_scale, roi_max_crop_scale)
+checkpoints/my_run/my_run_finetune/knn5/my_run_finetune_knn5_fold0.pt
+checkpoints/my_run/my_run_finetune/knn5/my_run_finetune_knn5_fold1.pt
+...
+checkpoints/my_run/my_run_ensembles/ensemble_knn5.pt          ← what you submit
+checkpoints/my_run/my_run_ensembles/ensemble_svmC2.0.pt
 ```
 
-| Argument | Default | Meaning |
-|---|---|---|
-| `--roi-min-crop-scale` | `0.6` | Smallest crop as a fraction of the full image |
-| `--roi-max-crop-scale` | `1.0` | Largest crop (1.0 = full image) |
+Per-fold W&B run gets one summary point with `val/AUROC`, `val/AUPRC`,
+`val/PPV@90RECALL`, `val/Threshold`. The pooled cross-LOCO-val metrics for
+each ensemble are printed at the end of the finetune job.
 
-Because each view draws its own scale, the two views of the same image see it at **different zoom levels** on every iteration, adding scale invariance to the contrastive objective.
+### 3. Submit
 
-### Positives: ROI-guided crops
+```bash
+cp checkpoints/my_run/my_run_ensembles/ensemble_knn5.pt model.pt
+docker build -t team-internship:latest -f Submission_files/Dockerfile .
+docker save -o RARE26-submission.tar team-internship:latest
+```
 
-When ROI guidance is active (via `--roi-records-path` or `--roi-guided-training`) and a record exists for a positive sample, both views are cropped to a region **centred on the annotated lesion ROI** at the randomly sampled scale. Each view also gets its own independent center jitter (`--roi-center-jitter`).
+`predict.py` auto-detects whether the checkpoint is a single fold or an
+ensemble bundle. The ensemble path averages each fold's positive-class
+probability per sample.
 
-- View 1: ROI-centred crop at scale₁, passed through `transform1`
-- View 2: ROI-centred crop at scale₂, passed through `roi_transform2`
+## Configuration cheatsheet
 
-When ROI guidance is inactive, or for positives without a record, both views fall through to the same random full-image crop described below.
+All knobs are pure CLI flags on `train.py`. Defaults match the best run.
 
-### Negatives: consistent random crops
+| Flag                          | Default | Notes                                    |
+| ----------------------------- | ------- | ---------------------------------------- |
+| `--stage`                     | —       | `pretrain` or `finetune` (required)      |
+| `--backbone-preset`           | `gastronet` | see `BACKBONE_PRESETS` in train.py   |
+| `--backbone-weights-path`     | None    | required for Gastronet/SimCLR/MoCo       |
+| `--input-size`                | 336     |                                          |
+| `--loco`                      | off     | enables leave-one-center-out             |
+| `--num-folds`                 | 1       | with `--loco`: must equal #centers       |
+| `--fold-index`                | 0       | starting fold (or only fold)             |
+| `--epochs`                    | 50      |                                          |
+| `--batch-size`                | 32      |                                          |
+| `--pretrain-backbone-lr`      | 1e-5    | dominant lever for SupPro                |
+| `--pretrain-proj-lr`          | 3e-4    |                                          |
+| `--warmup-epochs`             | 3       |                                          |
+| `--temperature`               | 0.1     |                                          |
+| `--base-temperature`          | 0.07    |                                          |
+| `--balanced-sampler`          | off     | enable BalancedBatchSampler              |
+| `--pos-ratio`                 | 0.2     | 20/80 in the best run                    |
+| `--augmentation-intensity`    | 3       | 1 (low) … 4 (extreme)                    |
+| `--head-types`                | `knn`   | subset of `{knn, svm}`                   |
+| `--knn-neighbors`             | `5`     | CSV — fits one head per value            |
+| `--svm-C`                     | `2.0`   | CSV — fits one head per value            |
+| `--encoder-ckpt`              | None    | CSV: one per fold for `--loco`           |
 
-Negatives have no ROI record but receive the **same random crop treatment** as positives: each view independently samples a scale from `[roi_min_crop_scale, roi_max_crop_scale]` and takes a randomly placed crop of that size from the full image. This prevents the model from using crop scale or field-of-view as a proxy for class identity.
+## Determinism
 
-### ROI context and aspect ratio
-
-| Argument | Default | Meaning |
-|---|---|---|
-| `--roi-context-scale` | `2.0` | Multiplier on the ROI bounding box before cropping (adds surrounding context) |
-| `--roi-max-aspect-ratio` | `1.5` | Maximum allowed aspect ratio of the ROI box; shorter side is expanded beyond this |
-| `--roi-center-jitter` | `0.05` | Random shift of the crop centre as a fraction of crop size |
-| `--roi-focus-prob` | `1.0` | Probability of applying ROI guidance to a positive that has a record |
-
----
-
-## Hard negative mining (off by default)
-
-Hard negatives are NDBE (label=0) images that a previously trained model incorrectly classified as neoplastic. When provided, they act as additional near-decision-boundary anchors in the SupPro loss.
-
-Hard negative mining is **disabled by default**. It activates only when `--hard-neg-roi-records-path` is explicitly provided and requires `--stage pretrain` with `--loss-name suppro`.
-
-| Argument | Default | Meaning |
-|---|---|---|
-| `--hard-neg-roi-records-path` | `None` (off) | Path to hard-negative ROI JSON |
-| `--hard-neg-roi-weight` | `0.2` | Weight of the hard-negative loss term |
-| `--hard-neg-roi-warmup-epochs` | `0` | Epochs before the hard-negative loss is switched on |
+`seed_everything` sets PYTHONHASHSEED / numpy / torch / cudnn deterministic
+mode and `CUBLAS_WORKSPACE_CONFIG=:4096:8`. Dataset row order is sorted by
+(center, label, img), so the same `--seed` yields the same LOCO/k-fold split.
