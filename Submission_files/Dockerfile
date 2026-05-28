@@ -6,7 +6,7 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-RUN python -m pip install --no-cache-dir torch torchvision timm pillow
+RUN python -m pip install --no-cache-dir torch torchvision timm pillow scikit-learn numpy
 
 COPY Submission_files/predict.py /app/predict.py
 COPY model.py /app/model.py

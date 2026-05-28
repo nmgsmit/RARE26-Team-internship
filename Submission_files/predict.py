@@ -66,6 +66,7 @@ def main():
     input_size = int(model_kwargs.get("input_size", DEFAULT_MODEL_KWARGS["input_size"]))
     n_classes = int(model_kwargs.get("n_classes", DEFAULT_MODEL_KWARGS["n_classes"]))
     backbone_name = model_kwargs.get("backbone_name", DEFAULT_MODEL_KWARGS["backbone_name"])
+    head_type = model_kwargs.get("head_type", "unknown")
 
     transform = Compose([
         ToImage(),
@@ -80,7 +81,7 @@ def main():
     print(
         f"Resolved checkpoint model | backbone={backbone_name} | "
         f"input_size={input_size} | n_classes={n_classes} | "
-        f"head_type={model_kwargs.get('head_type', 'unknown')}"
+        f"head_type={head_type}"
     )
     if dropped_metadata:
         print(
@@ -92,6 +93,20 @@ def main():
     ).to(device)
     load_model_checkpoint(model, MODEL_PATH, strict=True, map_location=device)
     model.eval()
+
+    is_sklearn_head = hasattr(model, "is_sklearn_head") and model.is_sklearn_head
+    head_fitted = is_sklearn_head and hasattr(model.head, "_fitted") and model.head._fitted
+
+    if is_sklearn_head and not head_fitted:
+        raise RuntimeError(
+            f"[ERROR] Model uses {head_type} classifier head which must be fitted during training.\n"
+            f"        The checkpoint does not contain a fitted {head_type} model.\n"
+            f"        Ensure that:\n"
+            f"        1. The training code properly fits the {head_type} head on training features\n"
+            f"        2. The checkpoint is saved AFTER the {head_type} head is fitted\n"
+            f"        3. The checkpoint includes the fitted sklearn model state\n"
+            f"        4. If training from scratch, call model.head.fit(X_train, y_train) before saving"
+        )
 
     with open(OUT_FILE, "w", newline="") as handle:
         writer = csv.writer(handle)
