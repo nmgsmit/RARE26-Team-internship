@@ -1,4 +1,5 @@
 import csv
+import inspect
 import os
 
 import torch
@@ -7,6 +8,15 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision.transforms.v2 import Compose, Normalize, Resize, ToDtype, ToImage
 
 from model import Model, load_model_checkpoint, resolve_model_kwargs_from_checkpoint
+
+
+def filter_model_kwargs_for_init(model_kwargs):
+    """Filter out kwargs that aren't valid Model.__init__ parameters."""
+    valid_keys = {
+        key for key in inspect.signature(Model.__init__).parameters
+        if key not in {"self", "kwargs"}
+    }
+    return {key: value for key, value in dict(model_kwargs).items() if key in valid_keys}
 
 TEST_DIR = "/data/test"
 MODEL_PATH = "/app/model.pt"
@@ -62,6 +72,9 @@ def main():
         for key in tuple(model_kwargs)
         if key in MODEL_METADATA_KEYS
     }
+
+    # Filter to keep only valid Model.__init__ parameters
+    model_kwargs = filter_model_kwargs_for_init(model_kwargs)
 
     input_size = int(model_kwargs.get("input_size", DEFAULT_MODEL_KWARGS["input_size"]))
     n_classes = int(model_kwargs.get("n_classes", DEFAULT_MODEL_KWARGS["n_classes"]))

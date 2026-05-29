@@ -791,11 +791,21 @@ class Model(nn.Module):
         if pretrained is None:
             pretrained = backbone_weights_path is None
 
+        # Filter out model-specific parameters that shouldn't be passed to backbone
+        # These are parameters used by the Model class but not by timm backbones
+        model_specific_params = {
+            "classifier_input_dim",  # Used for inferring classifier input, not backbone param
+            "backbone_preset",  # Metadata
+            "num_folds",  # Metadata
+            "fold_index",  # Metadata
+        }
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k not in model_specific_params}
+
         backbone_kwargs = dict(
             pretrained=pretrained,
             num_classes=0,
             in_chans=in_channels,
-            **kwargs,
+            **filtered_kwargs,
         )
         try:
             self.backbone = timm.create_model(
