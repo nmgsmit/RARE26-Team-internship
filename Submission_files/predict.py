@@ -9,6 +9,7 @@ inference time, mirroring how the LOCO ensemble is scored in train.py.
 """
 
 import csv
+import inspect
 import os
 
 import torch
@@ -17,6 +18,15 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision.transforms.v2 import Compose, Normalize, Resize, ToDtype, ToImage
 
 from model import Model, load_model_checkpoint, resolve_model_kwargs_from_checkpoint
+
+
+def filter_model_kwargs_for_init(model_kwargs):
+    """Filter out kwargs that aren't valid Model.__init__ parameters."""
+    valid_keys = {
+        key for key in inspect.signature(Model.__init__).parameters
+        if key not in {"self", "kwargs"}
+    }
+    return {key: value for key, value in dict(model_kwargs).items() if key in valid_keys}
 
 TEST_DIR = "/data/test"
 MODEL_PATH = "/app/model.pt"
@@ -90,6 +100,8 @@ def _build_single_model(payload, device):
     fallback = dict(DEFAULT_MODEL_KWARGS)
     model_kwargs = resolve_model_kwargs_from_checkpoint(payload, fallback_kwargs=fallback)
     model_kwargs, _dropped = _clean_model_kwargs(model_kwargs)
+    # Filter to keep only valid Model.__init__ parameters
+    model_kwargs = filter_model_kwargs_for_init(model_kwargs)
     input_size = int(model_kwargs.get("input_size", DEFAULT_MODEL_KWARGS["input_size"]))
     model = Model(**model_kwargs).to(device)
     state_dict = payload.get("model_state_dict")
