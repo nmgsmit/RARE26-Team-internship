@@ -51,7 +51,9 @@ ROI_BOX_COLOR = "#ffdd00"
 CROP_WINDOW_COLOR = "#00ddff"  # Cyan
 
 # ── roi helper imports ─────────────────────────────────────────────────────
-from roi_guidance import compute_crop_window_from_roi
+# Add parent directory to path for imports
+sys.path.insert(0, str(REPO_ROOT.parent))
+from ROI_helpers.roi_guidance import compute_crop_window_from_roi
 
 # ── denormalise helper ─────────────────────────────────────────────────────────
 _IMAGENET_MEAN = np.array([0.485, 0.456, 0.406])
@@ -158,7 +160,7 @@ def load_datasets(args):
         build_roi_focus_transform,
         build_seeded_generator,
     )
-    from roi_guidance import load_roi_records_from_json, canonicalize_image_path
+    from ROI_helpers.roi_guidance import load_roi_records_from_json, canonicalize_image_path
     from sklearn.model_selection import train_test_split
 
     torch.manual_seed(args.seed)
@@ -262,7 +264,7 @@ def compute_similarity_matrix(model, views1, views2):
 
 
 def visualize_batch(batch_indices, ds, train_df, roi_records, args, model, batch_num=0):
-    from roi_guidance import canonicalize_image_path
+    from ROI_helpers.roi_guidance import canonicalize_image_path
 
     n = len(batch_indices)
     has_model = model is not None
@@ -435,7 +437,7 @@ def main():
         labels_in_batch = [train_df.loc[i, "label"] for i in batch_indices]
         neo_count  = sum(1 for l in labels_in_batch if l == 1)
         ndbe_count = sum(1 for l in labels_in_batch if l == 0)
-        from roi_guidance import canonicalize_image_path as _canon
+        from ROI_helpers.roi_guidance import canonicalize_image_path as _canon
         roi_count  = sum(
             1 for i in batch_indices
             if train_df.loc[i, "label"] == 1

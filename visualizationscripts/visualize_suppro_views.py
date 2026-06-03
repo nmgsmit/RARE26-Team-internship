@@ -35,7 +35,13 @@ from data import (
     build_dataset_dataframe,
     build_roi_focus_transform,
 )
-from roi_guidance import (
+import sys
+from pathlib import Path
+
+# Add parent directory to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from ROI_helpers.roi_guidance import (
     canonicalize_image_path,
     crop_image_to_roi,
     load_roi_records_from_json,

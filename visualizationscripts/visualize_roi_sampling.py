@@ -5,7 +5,13 @@ from pathlib import Path
 from PIL import Image, ImageColor, ImageDraw, ImageFont
 
 from data import DEFAULT_DATA_DIR, build_dataset_dataframe
-from roi_guidance import (
+import sys
+from pathlib import Path
+
+# Add parent directory to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from ROI_helpers.roi_guidance import (
     DEFAULT_ROI_MAX_ASPECT_RATIO,
     compute_crop_window_from_roi,
     crop_image_to_roi,

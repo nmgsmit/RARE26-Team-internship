@@ -28,7 +28,7 @@ from model import (
     load_encoder_checkpoint,
     load_model_checkpoint,
 )
-from roi_guidance import (
+from ROI_helpers.roi_guidance import (
     build_roi_record_from_cam,
     canonicalize_image_path,
     load_roi_records_from_json,

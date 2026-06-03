@@ -22,7 +22,7 @@ from torchvision.transforms.v2 import (
     ToImage,
 )
 
-from roi_guidance import canonicalize_image_path, crop_image_to_roi
+from ROI_helpers.roi_guidance import canonicalize_image_path, crop_image_to_roi
 
 DEFAULT_DATA_DIR = "../data/Challenge_train_data"
 

@@ -1,13 +1,17 @@
 from argparse import ArgumentParser
 import inspect
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import torch
 
+# Add parent directory to path so we can import main modules
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from data import build_train_val_dataframes
 from model import Model, load_model_checkpoint, resolve_model_kwargs_from_checkpoint
-from roi_guidance import save_roi_records_to_json
+from ROI_helpers.roi_guidance import save_roi_records_to_json
 from train import build_gradcam_roi_records
 
 
