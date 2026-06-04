@@ -18,22 +18,38 @@ Create `build_gradcam_cache.sh`:
 
 ```bash
 #!/bin/bash
-#SBATCH --job-name=build_gradcam
-#SBATCH --output=logs/build_gradcam_%j.log
-#SBATCH --error=logs/build_gradcam_%j.err
-#SBATCH --time=04:00:00
-#SBATCH --mem=64G
-#SBATCH --cpus-per-task=8
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=18
 #SBATCH --gpus=1
+#SBATCH --partition=gpu_a100
+#SBATCH --time=04:00:00
+#SBATCH --output=slurm_gradcam/slurm_gradcam-%j.out
 
-# Activate virtual environment
-source venv/bin/activate
-
-# Create output directories
+set -euo pipefail
+mkdir -p slurm_gradcam
 mkdir -p ./checkpoints/roi_records
-mkdir -p ./logs
+
+# Load Python module
+module load 2023
+
+# Create/activate virtual environment
+if [ ! -d "venv" ]; then
+    python -m venv venv
+    source venv/bin/activate
+    pip install --upgrade pip
+    pip install -r requirements.txt
+else
+    source venv/bin/activate
+fi
+
+# Cache Hugging Face downloads outside the repo
+export HF_HOME="${HF_HOME:-/scratch-shared/${USER}/hf_cache}"
+export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
+mkdir -p "${HF_HOME}" "${HF_HUB_CACHE}"
 
 # Run the build script
+echo "Starting Grad-CAM cache build..."
 python ROI_helpers/build_gradcam_cache.py \
   --checkpoint ./gradcam_model.pt \
   --output-cache-path ./checkpoints/roi_records/rois.gradcam_cache.npz \
@@ -50,16 +66,17 @@ sbatch build_gradcam_cache.sh
 
 Monitor progress:
 ```bash
-squeue -u $USER              # Check job status
-tail -f logs/build_gradcam_*.log  # View live logs
+squeue -u $USER                    # Check job status
+tail -f slurm_gradcam/slurm_gradcam-*.out  # View live logs
 ```
 
-**Adjust SLURM parameters in the script:**
-- `--time=04:00:00` — Maximum runtime (4 hours)
-- `--mem=64G` — Memory allocation
-- `--cpus-per-task=8` — CPU cores
+**Customize SLURM parameters:**
+- `--nodes=1` — Number of compute nodes
+- `--ntasks=1` — Number of tasks
+- `--cpus-per-task=18` — CPU cores (adjust for your cluster)
 - `--gpus=1` — GPU count
-- `--partition=gpu` — Queue/partition name (check with `sinfo`)
+- `--partition=gpu_a100` — Queue/partition name (check with `sinfo`)
+- `--time=04:00:00` — Maximum runtime (increase if needed)
 
 #### Option B: Run Directly (Local/Interactive)
 
