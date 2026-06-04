@@ -10,21 +10,71 @@ The ROI (Region of Interest) guidance system enables the model to focus on patho
 
 ### Step 1: Build Grad-CAM Cache
 
-First, generate Grad-CAM heatmaps for all training and validation images:
+Generate Grad-CAM heatmaps for all training and validation images using SLURM batch job submission.
+
+#### Option A: Submit as SLURM Job (Recommended for Clusters)
+
+Create `build_gradcam_cache.sh`:
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=build_gradcam
+#SBATCH --output=logs/build_gradcam_%j.log
+#SBATCH --error=logs/build_gradcam_%j.err
+#SBATCH --time=04:00:00
+#SBATCH --mem=64G
+#SBATCH --cpus-per-task=8
+#SBATCH --gpus=1
+
+# Activate virtual environment
+source venv/bin/activate
+
+# Create output directories
+mkdir -p ./checkpoints/roi_records
+mkdir -p ./logs
+
+# Run the build script
+python ROI_helpers/build_gradcam_cache.py \
+  --checkpoint ./gradcam_model.pt \
+  --output-cache-path ./checkpoints/roi_records/rois.gradcam_cache.npz \
+  --batch-size 8 \
+  --num-workers 4
+
+echo "Grad-CAM cache build completed!"
+```
+
+Submit the job:
+```bash
+sbatch build_gradcam_cache.sh
+```
+
+Monitor progress:
+```bash
+squeue -u $USER              # Check job status
+tail -f logs/build_gradcam_*.log  # View live logs
+```
+
+**Adjust SLURM parameters in the script:**
+- `--time=04:00:00` — Maximum runtime (4 hours)
+- `--mem=64G` — Memory allocation
+- `--cpus-per-task=8` — CPU cores
+- `--gpus=1` — GPU count
+- `--partition=gpu` — Queue/partition name (check with `sinfo`)
+
+#### Option B: Run Directly (Local/Interactive)
 
 ```bash
 source venv/bin/activate
 
 python ROI_helpers/build_gradcam_cache.py \
   --checkpoint ./gradcam_model.pt \
-  --output-cache-path ./checkpoints/roi_records/rois.gradcam_cache.npz \
-  --data-dir ../data/Challenge_train_data
+  --output-cache-path ./checkpoints/roi_records/rois.gradcam_cache.npz
 ```
 
 **Arguments:**
-- `--checkpoint`: Path to your trained model checkpoint (required)
+- `--checkpoint`: Path to your trained model checkpoint (required, e.g., `./gradcam_model.pt`)
 - `--output-cache-path`: Where to save the Grad-CAM cache `.npz` file (required)
-- `--data-dir`: Training data directory containing class subfolders (default: `../data/Challenge_train_data`)
+- `--data-dir`: Training data directory (default: `../data/Challenge_train_data`)
 - `--target-class`: Class index for Grad-CAM (default: 1 for neo/positive class)
 - `--batch-size`: Batch size for processing (default: 8)
 - `--num-workers`: DataLoader worker count (default: 4)
