@@ -64,39 +64,6 @@ Submit the job:
 sbatch build_gradcam_cache.sh
 ```
 
-Monitor progress:
-```bash
-squeue -u $USER                    # Check job status
-tail -f slurm_gradcam/slurm_gradcam-*.out  # View live logs
-```
-
-**Customize SLURM parameters:**
-- `--nodes=1` — Number of compute nodes
-- `--ntasks=1` — Number of tasks
-- `--cpus-per-task=18` — CPU cores (adjust for your cluster)
-- `--gpus=1` — GPU count
-- `--partition=gpu_a100` — Queue/partition name (check with `sinfo`)
-- `--time=04:00:00` — Maximum runtime (increase if needed)
-
-#### Option B: Run Directly (Local/Interactive)
-
-```bash
-source venv/bin/activate
-
-python ROI_helpers/build_gradcam_cache.py \
-  --checkpoint ./gradcam_model.pt \
-  --output-cache-path ./checkpoints/roi_records/rois.gradcam_cache.npz
-```
-
-**Arguments:**
-- `--checkpoint`: Path to your trained model checkpoint (required, e.g., `./gradcam_model.pt`)
-- `--output-cache-path`: Where to save the Grad-CAM cache `.npz` file (required)
-- `--data-dir`: Training data directory (default: `../data/Challenge_train_data`)
-- `--target-class`: Class index for Grad-CAM (default: 1 for neo/positive class)
-- `--batch-size`: Batch size for processing (default: 8)
-- `--num-workers`: DataLoader worker count (default: 4)
-- `--cache-dtype`: Storage precision `float16` (default) or `float32`
-
 **Output:**
 - `./checkpoints/roi_records/rois.gradcam_cache.npz` — Compressed cache containing raw Grad-CAM maps for all images
 
