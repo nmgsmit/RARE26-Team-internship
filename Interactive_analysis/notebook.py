@@ -1,105 +1,42 @@
 """
-Stage 4: interactive UMAP/PCA notebook (marimo).
+Stage 4: interactive UMAP/PCA notebook (marimo), DEMO EDITION.
 
 Run with:
-    marimo run notebook.py
-
-Reads from features_out/<checkpoint_name>/ produced by extract_features.py.
-Select MULTIPLE feature folders to merge them on the same plot.
-
-Box-select points in the scatter plot to preview their source images and
-recompute statistics on the selected subset.
+    marimo edit notebook.py
 """
+
+# ── Pin Numba to single-threaded BEFORE any umap/numba import ─────────────────
+import os as _os
+_os.environ.setdefault("NUMBA_NUM_THREADS", "1")
+_os.environ.setdefault("NUMBA_THREADING_LAYER", "workqueue")
 
 import marimo
 
 __generated_with = "0.23.6"
-app = marimo.App(width="medium")
+app = marimo.App(width="full")  # Wide layout for side-by-side plots
 
-# ── Numba / UMAP threading safety ─────────────────────────────────────────
-# marimo runs cells reactively and can fit UMAP in more than one cell at once
-# (e.g. the main projection and the two side-by-side comparison panels). UMAP
-# uses Numba; Numba's default "workqueue" parallel layer is NOT threadsafe and
-# aborts the whole process on concurrent access ("Concurrent access has been
-# detected"). We avoid this two ways:
-#   1. Pin a threadsafe layer (TBB if available, else OpenMP), verified by
-#      actually running a parallel function so an unavailable layer can't slip
-#      through. This is the primary fix.
-#   2. Force single-threaded Numba. Free here because UMAP already runs
-#      single-threaded whenever random_state is set (hence the "n_jobs
-#      overridden to 1" warning), so we lose no speed and remove the hazard.
-# A lock inside fit_umap_safe (a FUNCTION ATTRIBUTE, not a module global —
-# marimo mangles module-level underscore names so @app.function helpers can't
-# see them) additionally serializes fits as a belt-and-suspenders guard.
-import os
-
-os.environ.setdefault("NUMBA_NUM_THREADS", "1")
-import numba
+# ── Store UMAP lock on the threading module, survives marimo's name mangling ──
+import threading as _threading_init
+if not hasattr(_threading_init, "umap_lock"):
+    _threading_init.umap_lock = _threading_init.Lock()
 
 
-def _numba_layer_works(layer):
-    """Set THREADING_LAYER=layer and verify it actually LOADS at runtime by
-    executing a tiny parallel-region function. Just assigning the config string
-    is not enough — an unavailable layer (e.g. TBB not installed) only errors
-    when a parallel function first runs, which is exactly the crash we're
-    trying to pre-empt. Returns True iff the layer ran successfully."""
-    try:
-        numba.config.THREADING_LAYER = layer
-        import numpy as _np
-
-        @numba.njit(parallel=True, cache=False)
-        def _probe(a):
-            s = 0.0
-            for _i in numba.prange(a.shape[0]):
-                s += a[_i]
-            return s
-
-        _probe(_np.ones(8, dtype=_np.float64))
-        return True
-    except Exception:
-        return False
-
-
-# Prefer a threadsafe layer (tbb, then omp). Fall back to workqueue only if
-# neither threadsafe layer loads.
-_chosen_layer = None
-for _layer in ("tbb", "omp"):
-    if _numba_layer_works(_layer):
-        _chosen_layer = _layer
-        break
-if _chosen_layer is None:
-    try:
-        numba.config.THREADING_LAYER = "workqueue"
-    except Exception:
-        pass
-    _chosen_layer = "workqueue"
-
-
+# ── Public helper: UMAP fit (serialized through the module-level lock) ────────
 @app.function
 def fit_umap_safe(X, n_neighbors, min_dist, metric, seed, n_components=2):
-    """Fit UMAP, serialized through a lock so concurrent cell execution can
-    never trigger Numba's non-threadsafe parallel region. Public name so any
-    cell can call it. The lock lives as an ATTRIBUTE OF THIS FUNCTION rather
-    than a module global, because marimo mangles module-level underscore names
-    (`_UMAP_LOCK` → `_cell_<hash>_UMAP_LOCK`) which an @app.function cannot
-    resolve. Returns the 2-D (or n_components-D) embedding."""
     import threading
     import warnings
     import umap
 
-    # Lazily create the lock once, attached to the function object itself.
-    _lock = getattr(fit_umap_safe, "_lock", None)
+    _lock = getattr(threading, "umap_lock", None)
     if _lock is None:
-        _lock = threading.Lock()
-        fit_umap_safe._lock = _lock
+        threading.umap_lock = threading.Lock()
+        _lock = threading.umap_lock
 
     _n = max(2, int(min(n_neighbors, max(2, X.shape[0] - 1))))
     with _lock:
         with warnings.catch_warnings():
-            # benign: UMAP forces single-threaded when random_state is set.
-            warnings.filterwarnings(
-                "ignore", message=".*n_jobs value.*overridden.*"
-            )
+            warnings.filterwarnings("ignore", message=".*n_jobs value.*overridden.*")
             reducer = umap.UMAP(
                 n_neighbors=_n,
                 min_dist=float(min_dist),
@@ -108,313 +45,544 @@ def fit_umap_safe(X, n_neighbors, min_dist, metric, seed, n_components=2):
                 random_state=int(seed),
             )
             return reducer.fit_transform(X)
-
-
-@app.cell
-def _imports():
+# ── Public helper: load experiment for overview ───────────────────────────────
+@app.function
+def ov_load_experiment(features_root, stem, feature_kind="projection"):
     import json
     from pathlib import Path
-
-    import marimo as mo
-    import numpy as np
-    import plotly.graph_objects as go
-    import umap
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import (
-        accuracy_score,
-        balanced_accuracy_score,
-        roc_auc_score,
-    )
-    from sklearn.model_selection import StratifiedKFold, cross_validate
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.decomposition import PCA
-
-    return (
-        LogisticRegression,
-        PCA,
-        Path,
-        StandardScaler,
-        StratifiedKFold,
-        accuracy_score,
-        balanced_accuracy_score,
-        cross_validate,
-        go,
-        json,
-        mo,
-        np,
-        roc_auc_score,
-        umap,
-    )
-
-
-@app.function
-def cmp_load_stem(features_root, dirs, feature_kind):
-    """Load one experiment stem's merged train+test arrays for the comparison
-    view. `dirs` is the list of folders for this stem (from stem_to_dirs).
-    `feature_kind` is 'pooled' or 'projection'. Returns a dict bundle or None.
-    Public name so the comparison cell can call it.
-    """
-    import json
     import numpy as np
 
-    feature_file = (
-        "features_pooled.npy" if feature_kind == "pooled" else "features_proj.npy"
-    )
-    feats_all, labels_all, probs_all, tags_all, paths_all = [], [], [], [], []
+    _feature_file = "features_pooled.npy" if feature_kind == "pooled" else "features_proj.npy"
+
+    features_root = Path(features_root).expanduser()
+    feats_all, labels_all, tags_all, centers_all, paths_all, probs_all = [], [], [], [], [], []
     class_names = None
-    for d in dirs:
-        meta_path = d / "meta.json"
-        if not meta_path.exists():
+    for _split in ("train_all", "evc_test"):
+        _folder = features_root / f"{stem}____{_split}" if not (features_root / f"{stem}__{_split}").exists() else features_root / f"{stem}__{_split}"
+        if not _folder.exists():
+            _cands = list(features_root.glob(f"{stem}*{_split}*"))
+            if not _cands:
+                continue
+            _folder = _cands[0]
+        _meta_path = _folder / "meta.json"
+        if not _meta_path.exists():
             continue
-        meta = json.loads(meta_path.read_text())
+        _meta = json.loads(_meta_path.read_text())
         if class_names is None:
-            class_names = meta["class_names"]
-        feats = np.load(d / feature_file)
-        lbls = np.load(d / "labels.npy")
-        pts = np.load(d / "paths.npy", allow_pickle=True)
-        probs_raw = np.load(d / "deployed_probs.npy")
-        probs = probs_raw[:, 1] if probs_raw.ndim == 2 else probs_raw
-        _tag = meta.get("dataset_tag", d.name.split("__")[-1])
-        feats_all.append(feats)
-        labels_all.append(lbls)
-        probs_all.append(probs)
-        paths_all.extend(pts)
-        tags_all.extend([_tag] * len(lbls))
+            class_names = _meta["class_names"]
+        # Fall back to projection features if pooled file is absent.
+        _ff = _folder / _feature_file
+        if not _ff.exists():
+            _ff = _folder / "features_proj.npy"
+        _feats = np.load(_ff)
+        _lbls = np.load(_folder / "labels.npy")
+        _paths_f = _folder / "paths.npy"
+        _paths = None
+        if _paths_f.exists():
+            try:
+                _paths = np.load(_paths_f, allow_pickle=True)
+            except Exception:
+                _paths = None
+
+        _probs_f = _folder / "deployed_probs.npy"
+        if _probs_f.exists():
+            _probs_raw = np.load(_probs_f)
+            _probs = _probs_raw[:, 1] if _probs_raw.ndim == 2 else _probs_raw
+        else:
+            _probs = np.zeros(len(_lbls))
+
+        _centers = resolve_centers(_folder, _paths, len(_lbls), _split)
+        feats_all.append(_feats)
+        labels_all.append(_lbls)
+        tags_all.extend([_split] * len(_lbls))
+        centers_all.append(_centers)
+        probs_all.append(_probs)
+        paths_all.extend(_paths if _paths is not None else [""] * len(_lbls))
     if not feats_all:
         return None
     return {
-        "features":       np.concatenate(feats_all, axis=0),
-        "labels":         np.concatenate(labels_all, axis=0),
-        "deployed_probs": np.concatenate(probs_all, axis=0),
+        "features":       np.concatenate(feats_all, 0),
+        "labels":         np.concatenate(labels_all, 0),
         "tags":           np.array(tags_all),
+        "centers":        np.concatenate(centers_all, 0),
+        "deployed_probs": np.concatenate(probs_all, 0),
         "paths":          np.asarray(paths_all, dtype=object),
         "class_names":    class_names,
     }
 
 
+# ── Public helper: PCA 2D ─────────────────────────────────────────────────────
 @app.function
-def cmp_build_scatter(bundle, title, proj_method, seed,
-                      n_neighbors, min_dist, metric):
-    """Build a single Plotly scatter for ONE checkpoint bundle, with an
-    INDEPENDENT 2D projection fit on that checkpoint's own features. Returns
-    (figure, metrics_dict). Public name so the comparison cell can call it.
+def ov_pca_coords(X):
+    from sklearn.decomposition import PCA
+    return PCA(n_components=2, random_state=42).fit_transform(X)
+# ── Public helper: Interactive Phase Scatter ──────────────────────────────────
+@app.function
+def build_phase_view(bundle, proj_method="PCA", seed=42,
+                     n_neighbors=15, min_dist=0.1, metric="cosine",
+                     max_points=600):
+    """Project + subsample ONCE so coordinates are stable.
+
+    Returns a dict of parallel per-point arrays. Crucially, the projection and
+    the subsample are computed a single time here, independent of how the points
+    are later coloured (by class or by center). That guarantees a point keeps the
+    exact same (x, y) when you toggle the colour mode, only its colour changes.
     """
     import numpy as np
-    import plotly.graph_objects as go
-    from sklearn.decomposition import PCA
-    from sklearn.metrics import roc_auc_score
 
     X = bundle["features"]
     y = bundle["labels"]
-    p = bundle["deployed_probs"]
     t = bundle["tags"]
     class_names = bundle["class_names"]
+    paths = bundle.get("paths", np.array([""] * len(y), dtype=object))
+    probs = bundle.get("deployed_probs", np.zeros(len(y)))
+    centers = bundle.get("centers", np.array(["unknown"] * len(y), dtype=object))
 
-    # ── Independent projection (each checkpoint fit on its own data) ──────
-    if proj_method == "PCA" or X.shape[0] < 4:
-        coords = PCA(n_components=2, random_state=int(seed)).fit_transform(X)
-        proj_name = "PCA"
-    else:
+    if proj_method == "UMAP":
         try:
-            # Locked helper: serializes UMAP fits so the two comparison panels
-            # (and the main projection) can't run a Numba parallel region at
-            # the same time.
             coords = fit_umap_safe(X, n_neighbors, min_dist, metric, seed)
-            proj_name = "UMAP"
+            proj_label = "UMAP"
         except Exception:
-            # umap not installed or failed → fall back to PCA so the panel
-            # still renders.
-            coords = PCA(n_components=2, random_state=int(seed)).fit_transform(X)
-            proj_name = "PCA (UMAP unavailable)"
+            coords = ov_pca_coords(X)
+            proj_label = "PCA (UMAP failed)"
+    else:
+        coords = ov_pca_coords(X)
+        proj_label = "PCA"
 
-    _CLASS_COLORS = ["#009E73", "#D55E00", "#0072B2", "#E69F00", "#CC79A7", "#56B4E9", "#F0E442", "#000000"]
-    
-    def hex_to_rgba(hex_color, alpha=1.0):
+    is_test = np.array(["train" not in str(_tg).lower() for _tg in t])
+
+    # Single deterministic subsample over ALL points (not per colour group).
+    n = coords.shape[0]
+    idx = np.arange(n)
+    if n > max_points:
+        idx = np.random.default_rng(seed).choice(n, max_points, replace=False)
+        idx.sort()
+
+    # Center labels: held-out test points are relabelled to one "test" group.
+    centers = np.asarray(centers, dtype=object).copy()
+    centers[is_test] = "EVC (test)"
+
+    return {
+        "xs":          coords[idx, 0].astype(float),
+        "ys":          coords[idx, 1].astype(float),
+        "labels_idx":  y[idx].astype(int),
+        "class_names": list(class_names),
+        "centers":     centers[idx],
+        "is_test":     is_test[idx],
+        "paths":       np.asarray([str(paths[i]) for i in idx], dtype=object),
+        "probs":       np.asarray([float(probs[i]) for i in idx], dtype=float),
+        "proj_label":  proj_label,
+    }
+
+
+@app.function
+def render_phase_fig(view, title, color_by="class", width=250, height=250):
+    """Render a scatter from a precomputed stable view, colouring by class or
+    center. Point positions come straight from `view` and never change between
+    colour modes."""
+    import numpy as np
+    import plotly.graph_objects as go
+
+    def _rgba(hex_color, alpha=1.0):
         h = hex_color.lstrip("#")
-        if len(h) == 6:
-            r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-            return f"rgba({r},{g},{b},{alpha})"
-        return hex_color
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        return f"rgba({r},{g},{b},{alpha})"
+
+    xs = view["xs"]; ys = view["ys"]
+    y = view["labels_idx"]
+    class_names = view["class_names"]
+    is_test = view["is_test"]
+    paths = view["paths"]; probs = view["probs"]
+    centers = view["centers"]
+    proj_label = view["proj_label"]
 
     fig = go.Figure()
-    _splits = sorted(set(t.tolist()), key=lambda x: ("train" not in x.lower(), x))
-    for _split in _splits:
-        _is_train = "train" in _split.lower()
-        _sym = "circle" if _is_train else "diamond"
-        _alpha = 0.35 if _is_train else 0.95
-        _lw = 0.4 if _is_train else 1.1
-        _lc = "rgba(255,255,255,0.6)" if _is_train else "#222222"
-        _sz = 6 if _is_train else 8
 
-        for _ci, _cn in enumerate(class_names):
-            _m = (y == _ci) & (t == _split)
-            if not _m.any():
+    if color_by == "class":
+        _CLASS_COLORS = ["#009E73", "#D55E00"]
+        groups = [(ci, cn) for ci, cn in enumerate(class_names)]
+        def _key(i):     return y[i]
+        def _color(g):   return _CLASS_COLORS[g % 2]
+        def _name(g, cn): return cn
+        group_ids = [g[0] for g in groups]
+        group_lbls = {g[0]: g[1] for g in groups}
+    else:  # center
+        _CENTER_COLORS = ["#0072B2", "#E69F00", "#CC79A7", "#56B4E9", "#F0E442", "#009E73", "#D55E00", "#000000"]
+        uniq = sorted(set(centers.tolist()))
+        if "EVC (test)" in uniq:
+            uniq.remove("EVC (test)"); uniq.append("EVC (test)")
+        color_of = {lab: _CENTER_COLORS[i % len(_CENTER_COLORS)] for i, lab in enumerate(uniq)}
+        group_ids = uniq
+        group_lbls = {u: u for u in uniq}
+
+    # Draw train first (translucent circles), then test (opaque diamonds on top).
+    for _is_train_pass in (True, False):
+        _alpha = 0.45 if _is_train_pass else 0.95
+        _sym = "circle" if _is_train_pass else "diamond"
+        _lw = 0.3 if _is_train_pass else 0.9
+        _lc = "rgba(255,255,255,0.6)" if _is_train_pass else "#222222"
+        _sz = 5 if _is_train_pass else 7
+        split_mask = (~is_test) if _is_train_pass else is_test
+        split_word = "train" if _is_train_pass else "test"
+
+        for g in group_ids:
+            if color_by == "class":
+                m = (y == g) & split_mask
+                color = _rgba(["#009E73", "#D55E00"][g % 2], _alpha)
+                gname = group_lbls[g]
+                clabels = [class_names[int(y[i])] for i in np.where(m)[0]]
+            else:
+                m = (centers == g) & split_mask
+                color = _rgba(color_of[g], _alpha)
+                gname = group_lbls[g]
+                clabels = [class_names[int(y[i])] for i in np.where(m)[0]]
+            if not m.any():
                 continue
-            
-            _color_rgba = hex_to_rgba(_CLASS_COLORS[_ci % len(_CLASS_COLORS)], _alpha)
+            idxs = np.where(m)[0]
+            custom = [[paths[i], class_names[int(y[i])], float(probs[i])] for i in idxs]
             fig.add_trace(go.Scatter(
-                x=coords[_m, 0], y=coords[_m, 1],
+                x=xs[idxs].tolist(), y=ys[idxs].tolist(),
                 mode="markers",
-                name=f"{_cn} ({_split})",
-                marker=dict(
-                    size=_sz,
-                    symbol=_sym,
-                    color=_color_rgba,
-                    line=dict(width=_lw, color=_lc),
-                ),
+                name=f"{gname} ({split_word})",
+                marker=dict(size=_sz, symbol=_sym, color=color,
+                            line=dict(width=_lw, color=_lc)),
+                customdata=custom,
                 hovertemplate=(
-                    f"{_cn} / {_split}<br>"
-                    "p(class 1)=%{customdata:.3f}<extra></extra>"
+                    f"<b>{gname}</b> / {split_word}<br>"
+                    "class: %{customdata[1]}<br>"
+                    "p: %{customdata[2]:.3f}<br>"
+                    "%{customdata[0]}<extra></extra>"
                 ),
-                customdata=p[_m],
+                showlegend=False,
             ))
 
     fig.update_layout(
-        title=f"{title}  ·  {proj_name}",
-        width=460, height=460,
-        margin=dict(l=30, r=10, t=50, b=30),
+        width=width, height=height,
+        margin=dict(l=6, r=6, t=6, b=6),
         plot_bgcolor="white",
-        legend=dict(font=dict(size=9), bgcolor="rgba(255,255,255,0.6)"),
+        paper_bgcolor="rgba(0,0,0,0)",
+        dragmode="select",
+        hovermode="closest",
     )
-    fig.update_xaxes(showgrid=True, gridcolor="#eee", zeroline=False,
-                     showticklabels=False)
-    fig.update_yaxes(showgrid=True, gridcolor="#eee", zeroline=False,
-                     showticklabels=False)
+    fig.update_xaxes(showgrid=False, zeroline=False, showticklabels=False,
+                     showline=True, linewidth=1, linecolor="#333", mirror=True, ticks="")
+    fig.update_yaxes(showgrid=False, zeroline=False, showticklabels=False,
+                     showline=True, linewidth=1, linecolor="#333", mirror=True, ticks="")
 
-    # ── Threshold-free metric: deployed ROC-AUC over the merged data ──────
-    if len(np.unique(y)) >= 2:
-        try:
-            _auc = float(roc_auc_score(y, p))
-        except ValueError:
-            _auc = float("nan")
-    else:
-        _auc = float("nan")
-    metrics = {
-        "checkpoint": title,
-        "n_samples": int(X.shape[0]),
-        "feature_dim": int(X.shape[1]),
-        "deployed_auc": _auc,
+    plotted = {
+        "xs": xs, "ys": ys,
+        "paths": paths,
+        "labels": np.asarray([class_names[int(c)] for c in y], dtype=object),
+        "probs": probs,
     }
-    return fig, metrics
-
-
+    return fig, plotted
+# ── Public helper: range-based preview for phase panels ──────────────────────
 @app.function
-def representation_metrics(X, y, cac_top_r=0.10, gpu_t=2.0, eps=1e-12):
-    """Representation-quality metrics following Mildenberger et al. (2025).
+def render_range_preview(panels, mo, prefer_index=None):
+    """Preview images for points inside box-selections across phase panels.
 
-    In addition to standard within-class cluster-distance metrics, we report a
-    cross-class consistency metric that catches representation collapse the
-    within-class metrics miss. All distances are computed on **L2-normalized**
-    features, so they live on the unit sphere (matching the paper's setup).
+    `panels` is a list of (plotted, ranges) tuples, where `plotted` is the dict
+    returned by render_phase_fig and `ranges` is widget.ranges (the box
+    extents). This does NOT depend on customdata surviving the frontend
+    round-trip; it masks the originally-plotted coordinates by the selected box,
+    exactly like the deep-dive scatter does.
 
-    Inputs
-    ------
-    X : (n, d) float array of features (raw; normalized internally).
-    y : (n,)  int label array.
-    cac_top_r : fraction r for the CAC top-r% nearest-neighbor neighborhood.
-    gpu_t : scale t in the Gaussian-potential kernel exp(-t * d^2).
-
-    Returns a dict with:
-      n, n_per_class (dict),
-      SAD : Sample Alignment Distance  (lower better) — mean L2 distance from
-            each sample to its nearest SAME-class neighbor. Within-class
-            tightness.
-      CAD : Class Alignment Distance   (lower better) — mean pairwise within-
-            class L2 distance, averaged across classes.
-      CAC : Class Alignment Consistency (higher better, max 1.0) — for each
-            sample, the fraction of its top-r% nearest neighbors (any class)
-            that share its class; averaged over all samples. The single most
-            useful number — captures whether local neighborhoods are class-pure.
-      GPU : Gaussian Potential Uniformity (lower better) — log of the mean
-            Gaussian potential exp(-t*d^2) over all pairs. A too-low value
-            combined with a bad CAC means features are uniform but class-mixed.
-
-    Any metric that is undefined for the given data (e.g. CAD needs ≥2 samples
-    in a class; CAC/SAD need ≥2 samples total) is returned as NaN.
+    If `prefer_index` is given (the last-touched panel), that panel's selection
+    is shown and the others are ignored. Falls back to the first panel that has
+    an active selection.
     """
+    import base64
+    from io import BytesIO
     import numpy as np
 
-    X = np.asarray(X, dtype=np.float64)
-    y = np.asarray(y)
-    n = X.shape[0]
-    nan = float("nan")
-    if n < 2:
-        return {
-            "n": int(n), "n_per_class": {},
-            "SAD": nan, "CAD": nan, "CAC": nan, "GPU": nan,
-        }
+    _empty_msg = mo.md(
+        "<div style='text-align:center; color:#888; margin-top:2rem; font-size:13px;'>"
+        "<i>Box-select points in any scatter plot<br>to preview images here.</i>"
+        "</div>"
+    )
 
-    # L2-normalize onto the unit sphere (paper's setup).
-    _norms = np.linalg.norm(X, axis=1, keepdims=True)
-    Xn = X / np.maximum(_norms, eps)
+    def _select_from(_plotted, _ranges):
+        if not _ranges or "x" not in _ranges or "y" not in _ranges:
+            return None
+        if _plotted is None or len(_plotted.get("xs", [])) == 0:
+            return None
+        _xr = _ranges["x"]; _yr = _ranges["y"]
+        _xmin, _xmax = min(_xr), max(_xr)
+        _ymin, _ymax = min(_yr), max(_yr)
+        _xs = _plotted["xs"]; _ys = _plotted["ys"]
+        _mask = (_xs >= _xmin) & (_xs <= _xmax) & (_ys >= _ymin) & (_ys <= _ymax)
+        if not _mask.any():
+            return None
+        return (
+            _plotted["paths"][_mask].tolist(),
+            _plotted["labels"][_mask].tolist(),
+            _plotted["probs"][_mask].tolist(),
+        )
 
-    # Full pairwise Euclidean distance matrix on the sphere.
-    # (n is a few thousand here, so the dense matrix is fine.)
-    _gram = Xn @ Xn.T
-    _sq = np.maximum(0.0, 2.0 - 2.0 * _gram)
-    D = np.sqrt(_sq, dtype=np.float64)
-    np.fill_diagonal(D, np.inf)  # exclude self for nearest-neighbor queries
+    # Prefer the last-touched panel; show only its selection ("others ignored").
+    # Only fall back to scanning other panels when nothing has been touched yet.
+    _sel = None
+    if prefer_index is not None and 0 <= prefer_index < len(panels):
+        _sel = _select_from(*panels[prefer_index])
+    else:
+        for _plotted, _ranges in panels:
+            _sel = _select_from(_plotted, _ranges)
+            if _sel is not None:
+                break
 
-    classes = np.unique(y)
-    n_per_class = {int(c): int((y == c).sum()) for c in classes}
+    if _sel is None:
+        return _empty_msg
 
-    # ── SAD: nearest SAME-class neighbor distance, averaged over samples ──
-    _sad_vals = []
-    for _i in range(n):
-        _same = (y == y[_i])
-        _same[_i] = False
-        if _same.any():
-            _sad_vals.append(D[_i, _same].min())
-    SAD = float(np.mean(_sad_vals)) if _sad_vals else nan
+    _sel_paths, _sel_labels, _sel_probs = _sel
 
-    # ── CAD: mean within-class pairwise distance, averaged across classes ─
-    _cad_per_class = []
-    for _c in classes:
-        _idx = np.where(y == _c)[0]
-        if _idx.size >= 2:
-            _sub = D[np.ix_(_idx, _idx)]
-            _finite = _sub[np.isfinite(_sub)]
-            if _finite.size:
-                _cad_per_class.append(float(_finite.mean()))
-    CAD = float(np.mean(_cad_per_class)) if _cad_per_class else nan
+    try:
+        from PIL import Image as _PILImage
+        _pil_ok = True
+    except Exception as _e:
+        _pil_ok = False
+        _pil_err = str(_e)
 
-    # ── CAC: fraction of top-r% nearest neighbors sharing the class ───────
-    _k = max(1, int(round(cac_top_r * (n - 1))))
-    # argpartition for the k smallest distances per row (excludes self via inf)
-    _nn = np.argpartition(D, _k - 1, axis=1)[:, :_k]
-    _same_frac = (y[_nn] == y[:, None]).mean(axis=1)
-    CAC = float(_same_frac.mean())
+    _n_total = len(_sel_paths)
+    _max_preview = 8
+    _thumbs_html = []
+    if not _pil_ok:
+        _thumbs_html.append(f'<div style="color:red;">Pillow not installed: {_pil_err}</div>')
+    else:
+        for _k in range(min(_n_total, _max_preview)):
+            _path = str(_sel_paths[_k])
+            _label = str(_sel_labels[_k])
+            _prob = float(_sel_probs[_k])
+            try:
+                if _path:
+                    with _PILImage.open(_path) as _im:
+                        _im = _im.convert("RGB")
+                        _im.thumbnail((150, 150))
+                        _buf = BytesIO()
+                        _im.save(_buf, format="PNG")
+                        _b64 = base64.b64encode(_buf.getvalue()).decode("ascii")
+                    _img_tag = f'<img src="data:image/png;base64,{_b64}" style="display:block;margin:auto;max-width:100%;height:auto;border-radius:4px;">'
+                else:
+                    _img_tag = '<div style="width:100%;aspect-ratio:1;background:#f1f5f9;border-radius:4px;margin:auto;display:flex;align-items:center;justify-content:center;color:#94a3b8;font-size:11px;">no path</div>'
+            except Exception as _e:
+                _img_tag = f'<div style="color:red;font-size:11px;">err: {type(_e).__name__}</div>'
 
-    # ── GPU: log mean Gaussian potential over all unordered pairs ─────────
-    _iu = np.triu_indices(n, k=1)
-    _pair_d2 = _sq[_iu]
-    _pot = np.exp(-gpu_t * _pair_d2)
-    GPU = float(np.log(_pot.mean() + eps))
+            _caption = (
+                f'<div style="font-size:12px;text-align:center;margin-top:4px;line-height:1.2;">'
+                f'<strong style="color:#333;">{_label}</strong><br>'
+                f'<span style="color:#666;">p={_prob:.2f}</span></div>'
+            )
+            _thumbs_html.append(
+                f'<div style="border:1px solid #e2e8f0;padding:5px;border-radius:6px;background:white;box-shadow:0 1px 2px rgba(0,0,0,0.05);">'
+                f'{_img_tag}{_caption}</div>'
+            )
 
-    return {
-        "n": int(n), "n_per_class": n_per_class,
-        "SAD": SAD, "CAD": CAD, "CAC": CAC, "GPU": GPU,
-    }
+    _grid = (
+        '<div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(120px, 1fr));gap:10px;margin-top:12px;">'
+        + "".join(_thumbs_html) + "</div>"
+    )
+    return mo.vstack([
+        mo.md(f"**{_n_total} points selected**<br><span style='font-size:12px;color:#666;'>(showing up to {_max_preview}, biggest preview)</span>"),
+        mo.Html(_grid)
+    ])
+
+
+# ── Public helper: persistent PPV@90R progress chart ─────────────────────────
+@app.function
+def md_inline(text):
+    """Tiny inline-markdown → HTML converter for **bold** and *italic* so we can
+    embed explanation text inside a styled HTML block."""
+    import re
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"\*(.+?)\*", r"<i>\1</i>", text)
+    return text
 
 
 @app.function
+def progress_chart(reveal_up_to):
+    """The constant figure that grows each slide. Shows the running best
+    PPV@90Recall milestone for each phase, revealing points up to `reveal_up_to`
+    (a milestone index). The RARE25 1st-place baseline is always shown."""
+    import plotly.graph_objects as go
+
+    # (label, sublabel, PPV@90R). Index 0 is the baseline; 1..5 are the phases.
+    milestones = [
+        ("RARE25<br>1st place", "baseline 2025", 0.0355),
+        ("GastroNet DINOv2<br>CE", "Phase 1", 0.0136),
+        ("GastroNet DINOv2<br>SupPro", "Phase 1", 0.0146),
+        ("τ = 0.10", "Phase 2", 0.015),
+        ("balanced 25%", "Phase 3", 0.015),
+        ("random crop 0.8", "Phase 4", 0.017),
+        ("k-NN, crop 0.95", "Phase 5", 0.039),
+    ]
+    k = max(1, min(len(milestones), reveal_up_to))
+    shown = milestones[:k]
+
+    xs = list(range(len(shown)))
+    ys = [m[2] for m in shown]
+    labels = [m[0] for m in shown]
+    subs = [m[1] for m in shown]
+
+    fig = go.Figure()
+
+    # Baseline reference line across the whole axis.
+    fig.add_hline(y=0.0355, line=dict(color="#888", dash="dot", width=1),
+                  annotation_text="RARE25 best (0.0355)", annotation_position="top left",
+                  annotation_font=dict(size=9, color="#888"))
+
+    # The progress line for the phases (index >= 1).
+    if len(shown) >= 2:
+        fig.add_trace(go.Scatter(
+            x=xs[1:], y=ys[1:], mode="lines+markers",
+            line=dict(color="#0072B2", width=2.5),
+            marker=dict(size=11, color="#0072B2", line=dict(color="white", width=1.5)),
+            hovertemplate="%{text}<br>PPV@90R=%{y:.4f}<extra></extra>",
+            text=[f"{labels[i]} ({subs[i]})" for i in range(1, len(shown))],
+            showlegend=False,
+        ))
+
+    # The baseline point itself (distinct marker).
+    fig.add_trace(go.Scatter(
+        x=[0], y=[ys[0]], mode="markers",
+        marker=dict(size=12, color="#888", symbol="diamond", line=dict(color="white", width=1.5)),
+        hovertemplate="RARE25 1st place<br>PPV@90R=%{y:.4f}<extra></extra>",
+        showlegend=False,
+    ))
+
+    # Highlight the most recently revealed point.
+    fig.add_trace(go.Scatter(
+        x=[xs[-1]], y=[ys[-1]], mode="markers",
+        marker=dict(size=16, color="#D55E00", symbol="star", line=dict(color="white", width=1.5)),
+        hovertemplate="latest: %{y:.4f}<extra></extra>",
+        showlegend=False,
+    ))
+
+    # Value labels above each point.
+    for i in range(len(shown)):
+        fig.add_annotation(x=xs[i], y=ys[i], text=f"<b>{ys[i]:.4f}</b>",
+                           showarrow=False, yshift=16, font=dict(size=10, color="#333"))
+
+    fig.update_layout(
+        title=dict(text="Progress: PPV@90Recall vs RARE25 best", font=dict(size=13), x=0.5, xanchor="center"),
+        height=340, margin=dict(l=50, r=20, t=50, b=80),
+        plot_bgcolor="white", paper_bgcolor="rgba(0,0,0,0)",
+        yaxis_title="PPV@90Recall",
+    )
+    fig.update_xaxes(
+        tickmode="array", tickvals=xs,
+        ticktext=[f"{labels[i]}" for i in range(len(shown))],
+        tickfont=dict(size=8), showgrid=False,
+        showline=True, linecolor="#333", range=[-0.4, max(6.4, len(shown)-0.6)],
+    )
+    fig.update_yaxes(
+        range=[0, 0.045], showgrid=True, gridcolor="#eee",
+        showline=True, linecolor="#333",
+    )
+    return fig
+
+
+# ── Public helper: compact per-phase legend ──────────────────────────────────
+@app.function
+def phase_legend_html(mode="both"):
+    """Small legend shown next to each phase's scatter. `mode` is 'class',
+    'center', or 'both'."""
+    def _dot(color, shape="circle", outline="#222"):
+        _radius = "50%" if shape == "circle" else "2px"
+        _rot = "" if shape == "circle" else "transform:rotate(45deg);"
+        return (
+            f'<span style="display:inline-block;width:10px;height:10px;'
+            f'background:{color};border:1px solid {outline};'
+            f'border-radius:{_radius};{_rot}margin-right:4px;vertical-align:middle;"></span>'
+        )
+    rows = []
+    if mode in ("class", "both"):
+        rows.append(
+            f'<div><b>Class:</b>&nbsp; {_dot("#009E73")}NDBE'
+            f'&nbsp;&nbsp;{_dot("#D55E00")}neoplasia</div>'
+        )
+    if mode in ("center", "both"):
+        rows.append(
+            f'<div><b>Center:</b>&nbsp; {_dot("#0072B2")}center 1'
+            f'&nbsp;&nbsp;{_dot("#E69F00")}center 2'
+            f'&nbsp;&nbsp;{_dot("#CC79A7")}EVC (test)</div>'
+        )
+    rows.append(
+        f'<div><b>Split:</b>&nbsp; {_dot("#888","circle","#fff")}train (●)'
+        f'&nbsp;&nbsp;{_dot("#888","diamond")}test (◆, on top)</div>'
+    )
+    return (
+        '<div style="font-size:11px;line-height:1.8;padding:6px 8px;'
+        'background:rgba(0,0,0,0.02);border-radius:6px;">'
+        + "".join(rows) + "</div>"
+    )
+
+
+# ── Public helper: static legend HTML ────────────────────────────────────────
+# ── Public helper: example image strips for slide 0 ──────────────────────────
+@app.function
+def example_images_html(features_root_value, mo, thumb_px=200, n_each=4):
+    import base64
+    import numpy as np
+    from io import BytesIO
+    from pathlib import Path
+    try:
+        from PIL import Image as _PILImage
+    except Exception:
+        return mo.md("*(Pillow not available; install to preview example images.)*")
+
+    root = Path(features_root_value).expanduser()
+    cand = None
+    if root.exists():
+        for p in sorted(root.glob("*")):
+            if (p / "paths.npy").exists() and (p / "labels.npy").exists():
+                cand = p
+                break
+    if cand is None:
+        return mo.md(
+            "*(No `paths.npy` found under the features root; example images will appear "
+            "here once real data is present.)*"
+        )
+
+    paths = np.load(cand / "paths.npy", allow_pickle=True)
+    labels = np.load(cand / "labels.npy")
+
+    def _strip(which_label, title, color):
+        idxs = np.where(labels == which_label)[0][:n_each]
+        thumbs = []
+        for i in idxs:
+            try:
+                with _PILImage.open(str(paths[i])) as im:
+                    im = im.convert("RGB"); im.thumbnail((thumb_px, thumb_px))
+                    buf = BytesIO(); im.save(buf, format="PNG")
+                    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+                tag = (f'<img src="data:image/png;base64,{b64}" '
+                       f'style="width:{thumb_px}px;height:{thumb_px}px;object-fit:cover;'
+                       f'border-radius:6px;display:block;">')
+            except Exception:
+                tag = f'<div style="width:{thumb_px}px;height:{thumb_px}px;background:#eee;border-radius:6px;"></div>'
+            thumbs.append(f"<div>{tag}</div>")
+        return (
+            f'<div style="flex:1;min-width:0;">'
+            f'<div style="font-size:14px;font-weight:600;color:{color};margin-bottom:6px;">{title}</div>'
+            f'<div style="display:flex;gap:8px;flex-wrap:nowrap;">{"".join(thumbs)}</div></div>'
+        )
+
+    html = (
+        '<div style="display:flex;gap:24px;align-items:flex-start;flex-wrap:wrap;">'
+        + _strip(0, "NDBE (non-dysplastic)", "#009E73")
+        + _strip(1, "Neoplasia", "#D55E00")
+        + '</div>'
+    )
+    return mo.Html(html)
+
+# ── Public helper: resolve acquisition centers ────────────────────────────────
+@app.function
 def resolve_centers(folder, paths, n, split):
-    """Best-effort acquisition-center label for each of the `n` rows of ONE
-    split folder. Tries, in order:
-      1. a centers/domains/sites/hospital .npy array in the folder
-      2. a 'centers'/'center'/'site'/'domain' field in meta.json
-      3. a regex on the image paths (looks for center/site/hospital tokens)
-    Returns a length-`n` numpy array of string labels, or an array of
-    "unknown" if nothing resolves. Public name so cells can use it.
-    """
     import json
     import re
     from pathlib import Path
     import numpy as np
 
     folder = Path(folder)
-
-    # 1) explicit array file
     for _name in ("centers.npy", "center.npy", "domains.npy", "domain.npy",
                   "sites.npy", "site.npy", "hospital.npy", "hospitals.npy"):
         _f = folder / _name
@@ -426,7 +594,6 @@ def resolve_centers(folder, paths, n, split):
             except Exception:
                 pass
 
-    # 2) meta.json field (either a per-row list, or a single scalar for the split)
     _meta = folder / "meta.json"
     if _meta.exists():
         try:
@@ -442,11 +609,6 @@ def resolve_centers(folder, paths, n, split):
                 if isinstance(_v, (str, int)):
                     return np.array([str(_v)] * n)
 
-    # 3) parse from image paths
-    #    Matches this project's layout:
-    #      train: .../data/center_1/...  .../data/center_2/...  (any center_N)
-    #      test:  .../EVC_Barretts_FullSet .../images/...  -> the EVC test center
-    #    plus generic fallbacks (center1, site-3, hospitalA, c01, ...).
     _pat_center = re.compile(
         r"(?:center|centre|site|hospital|clinic|domain)[\s_\-]?([A-Za-z0-9]+)",
         re.IGNORECASE,
@@ -462,7 +624,6 @@ def resolve_centers(folder, paths, n, split):
                 _labels.append(f"center {_m.group(1)}")
                 _any = True
             elif _pat_evc.search(_s):
-                # The EVC Barrett's full set is the held-out test center.
                 _labels.append("EVC (test)")
                 _any = True
             else:
@@ -470,1019 +631,513 @@ def resolve_centers(folder, paths, n, split):
         if _any:
             return np.array(_labels)
 
-    # nothing worked
     return np.array(["unknown"] * n)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# CELL 1: imports
+# ═══════════════════════════════════════════════════════════════════════════════
 @app.cell
-def _intro(mo):
-    mo.md("""
-    # SupCon-style feature evaluation
+def _imports():
+    import os as _os_imports
+    _os_imports.environ.setdefault("NUMBA_NUM_THREADS", "1")
+    _os_imports.environ.setdefault("NUMBA_THREADING_LAYER", "workqueue")
 
-    Visualizes the learned representation space for one or more checkpoints.
-    Select an experiment below to plot its train and test splits in the same 
-    representation space and see how well the test data aligns with the training clusters.
+    import json
+    from pathlib import Path
 
-    **Box-select** points in the scatter plot (toolbar → box-select tool, active by
-    default) to preview their source images and recompute statistics on the subset.
-    """)
-    return
+    import marimo as mo
+    import numpy as np
+    import plotly.graph_objects as go
+    import umap
+    from sklearn.decomposition import PCA
 
-
-@app.cell
-def _features_root(mo):
-    features_root = mo.ui.text(
-        value="features_out",
-        label="Features root directory",
-        full_width=True,
-    )
-    features_root
-    return (features_root,)
-
-
-@app.cell
-def _discover_checkpoints(Path, features_root, mo):
-    root = Path(features_root.value).expanduser()
-    if not root.exists():
-        mo.stop(True, mo.md(f"⚠️ `{root}` does not exist."))
-
-    if (root / "meta.json").exists():
-        checkpoint_dirs = [root]
-    else:
-        checkpoint_dirs = sorted(
-            p for p in root.iterdir()
-            if p.is_dir() and (p / "meta.json").exists()
-        )
-    mo.stop(
-        not checkpoint_dirs,
-        mo.md(f"⚠️ No checkpoint folders with `meta.json` under `{root}`."),
-    )
-
-    # ── Group folders by experiment stem ─────────────────────────────────
-    # Folder names look like:  <STEM>__<split>  where split ∈ {evc_test, train_all}
-    # We expose stems to the user; selecting a stem implicitly loads BOTH splits.
-    # Folders that don't follow the convention fall back to using their full
-    # name as the stem (so legacy folders still work).
-    _stem_to_dirs = {}
-    _known_splits = ("evc_test", "train_all")
-    for _d in checkpoint_dirs:
-        _stem = _d.name
-        for _split in _known_splits:
-            _suffix = f"__{_split}"
-            if _d.name.endswith(_suffix):
-                _stem = _d.name[: -len(_suffix)]
-                break
-        _stem_to_dirs.setdefault(_stem, []).append(_d)
-
-    experiment_stems = sorted(_stem_to_dirs.keys())
-    stem_to_dirs = {k: _stem_to_dirs[k] for k in experiment_stems}
-    return experiment_stems, stem_to_dirs
-
-
-@app.cell
-def _config_controls(experiment_stems, mo):
-    # Changed from multiselect to a single-select dropdown
-    experiment_picker = mo.ui.dropdown(
-        options=experiment_stems,
-        value=experiment_stems[0],
-        label="Select experiment (both train_all + evc_test are loaded)",
-    )
-    feature_picker = mo.ui.dropdown(
-        options=["pooled (768-D, paper's r)", "projection (128-D, paper's z)"],
-        value="pooled (768-D, paper's r)",
-        label="Features",
-    )
-    projection_picker = mo.ui.dropdown(
-        options=["UMAP", "PCA"],
-        value="UMAP",
-        label="Projection Method",
-    )
-    n_neighbors = mo.ui.slider(
-        start=5, stop=100, step=1, value=15, label="UMAP n_neighbors",
-    )
-    min_dist = mo.ui.slider(
-        start=0.0, stop=0.99, step=0.01, value=0.1, label="UMAP min_dist",
-    )
-    metric = mo.ui.dropdown(
-        options=["euclidean", "cosine"],
-        value="cosine",
-        label="UMAP metric",
-    )
-    seed = mo.ui.number(value=42, label="Random seed", start=0, stop=10_000)
-
-    controls = mo.vstack([
-        mo.hstack([experiment_picker]),
-        mo.hstack([projection_picker, feature_picker]),
-        mo.hstack([metric, n_neighbors, min_dist]),
-        mo.hstack([seed]),
-    ])
-    controls
     return (
-        experiment_picker,
-        feature_picker,
-        metric,
-        min_dist,
-        n_neighbors,
-        projection_picker,
-        seed,
+        PCA,
+        Path,
+        go,
+        json,
+        mo,
+        np,
     )
 
 
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DASHBOARD CONTROLS: slide navigation + per-phase display switches
+# ═══════════════════════════════════════════════════════════════════════════════
 @app.cell
-def _threshold_control(mo):
-    threshold = mo.ui.slider(
-        start=0.0, stop=1.0, step=0.01, value=0.5,
-        label="Confusion-matrix threshold (chosen, not deployed)",
-        show_value=True,
-    )
-    return (threshold,)
-
-
-@app.cell
-def _load_data(experiment_picker, feature_picker, json, mo, np, stem_to_dirs):
-    mo.stop(not experiment_picker.value, mo.md("⚠️ Select an experiment."))
-
-    # Get the underlying folders for the chosen experiment stem
-    _selected_dirs = stem_to_dirs.get(experiment_picker.value, [])
-
-    mo.stop(
-        not _selected_dirs,
-        mo.md("⚠️ No folders matched the picked experiment."),
-    )
-
-    feature_kind = "pooled" if feature_picker.value.startswith("pooled") else "projection"
-    feature_file = "features_pooled.npy" if feature_kind == "pooled" else "features_proj.npy"
-
-    all_features = []
-    all_labels = []
-    all_paths = []
-    all_probs = []
-    all_tags = []
-    all_centers = []
-
-    class_names = None
-
-    for s_dir in _selected_dirs:
-        meta = json.loads((s_dir / "meta.json").read_text())
-        if class_names is None:
-            class_names = meta["class_names"]
-
-        feats = np.load(s_dir / feature_file)
-        lbls = np.load(s_dir / "labels.npy")
-        pts = np.load(s_dir / "paths.npy", allow_pickle=True)
-        probs_raw = np.load(s_dir / "deployed_probs.npy")
-
-        # Prefer dataset_tag from meta; fall back to suffix after "__"
-        _tag = meta.get("dataset_tag", s_dir.name.split("__")[-1])
-
-        # Acquisition-center label per row (for the domain-shift view).
-        # The split component is the suffix after "__" (evc_test / train_all).
-        _split_name = s_dir.name.split("__")[-1]
-        _centers = resolve_centers(s_dir, pts, len(lbls), _split_name)
-
-        all_features.append(feats)
-        all_labels.append(lbls)
-        all_paths.extend(pts)
-        all_centers.append(_centers)
-
-        if probs_raw.ndim == 2:
-            all_probs.append(probs_raw[:, 1])
-        else:
-            all_probs.append(probs_raw)
-
-        all_tags.extend([_tag] * len(lbls))
-
-    # --- Gracefully catch dimensionality mismatches just in case ---
-    if all_features:
-        _expected_dim = all_features[0].shape[1]
-        for _i, _f in enumerate(all_features):
-            if _f.shape[1] != _expected_dim:
-                mo.stop(
-                    True,
-                    mo.md(
-                        f"⚠️ **Dimensionality Mismatch!**\n\n"
-                        f"The data from `{_selected_dirs[_i].name}` has **{_f.shape[1]}-D** features, "
-                        f"but earlier splits have **{_expected_dim}-D** features."
-                    )
-                )
-
-    features = np.concatenate(all_features, axis=0)
-    labels = np.concatenate(all_labels, axis=0)
-    paths = np.asarray(all_paths, dtype=object)
-    deployed_probs = np.concatenate(all_probs, axis=0)
-    tags = np.array(all_tags)
-    centers = np.concatenate(all_centers, axis=0)
-
-    summary_md = mo.md(
-        f"""
-        **Loaded experiment:** {experiment_picker.value} <br>
-        ({len(_selected_dirs)} folder(s)) <br>
-        **Features:** {feature_kind} ({features.shape[1]}-D) &nbsp;&nbsp;
-        **Total Samples:** {len(labels)}
-        """
-    )
-    summary_md
-    return centers, class_names, deployed_probs, features, labels, paths, tags
-
-
-@app.cell
-def _project_2d(
-    PCA,
-    features,
-    metric,
-    min_dist,
-    mo,
-    n_neighbors,
-    projection_picker,
-    seed,
-):
-    import hashlib
-
-    def _array_key(arr):
-        return hashlib.md5(arr.tobytes()).hexdigest()
-
-    @mo.cache
-    def _fit_umap(features_key, features, n_neighbors, min_dist, metric, seed):
-        # Route through the locked helper so this fit can't overlap with the
-        # comparison-panel fits (avoids the Numba workqueue concurrency abort).
-        return fit_umap_safe(features, n_neighbors, min_dist, metric, seed)
-
-    @mo.cache
-    def _fit_pca(features_key, features, seed):
-        reducer = PCA(n_components=2, random_state=int(seed))
-        return reducer.fit_transform(features)
-
-    _key = _array_key(features)
-
-    if projection_picker.value == "PCA":
-        coords_2d = _fit_pca(_key, features, seed.value)
-        proj_name = "PCA"
-    else:
-        coords_2d = _fit_umap(
-            _key, features, n_neighbors.value, min_dist.value, metric.value, seed.value,
-        )
-        proj_name = "UMAP"
-    return coords_2d, proj_name
-
-
-@app.cell
-def _scatter_plot(
-    class_names,
-    coords_2d,
-    deployed_probs,
-    go,
-    labels,
-    mo,
-    np,
-    paths,
-    proj_name,
-    tags,
-):
-    def hex_to_rgba(hex_color, alpha=1.0):
-        h = hex_color.lstrip("#")
-        if len(h) == 6:
-            r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-            return f"rgba({r},{g},{b},{alpha})"
-        return hex_color
-
-    _CLASS_COLORS = ["#009E73", "#D55E00", "#0072B2", "#E69F00", "#CC79A7", "#56B4E9", "#F0E442", "#000000"]
-
-    _fig = go.Figure()
-
-    _unique_tags = np.unique(tags)
-    _splits = sorted(_unique_tags, key=lambda x: ("train" not in x.lower(), x))
-    
-    for _t in _splits:
-        _is_train = "train" in _t.lower()
-        _marker_symbol = "circle" if _is_train else "diamond"
-        _alpha = 0.35 if _is_train else 0.95
-        _lw = 0.3 if _is_train else 1.1
-        _lc = "rgba(255,255,255,0.6)" if _is_train else "#222222"
-        _sz = 6 if _is_train else 8
-
-        for _cls_idx, _cls_name in enumerate(class_names):
-            _mask = (labels == _cls_idx) & (tags == _t)
-            if not np.any(_mask):
-                continue
-
-            _cls_idxs = np.where(_mask)[0]
-            _hover_text = [
-                f"Dataset: {_t}<br>Path: {str(paths[i])}<br>"
-                f"label={_cls_name}<br>p(class 1) deployed={float(deployed_probs[i]):.3f}"
-                for i in _cls_idxs
-            ]
-
-            _color_rgba = hex_to_rgba(_CLASS_COLORS[_cls_idx % len(_CLASS_COLORS)], _alpha)
-
-            _fig.add_trace(go.Scatter(
-                x=coords_2d[_mask, 0],
-                y=coords_2d[_mask, 1],
-                mode="markers",
-                name=f"{_cls_name} ({_t})",
-                marker=dict(
-                    size=_sz,
-                    symbol=_marker_symbol,
-                    color=_color_rgba,
-                    line=dict(width=_lw, color=_lc),
-                ),
-                text=_hover_text,
-                hovertemplate="%{text}<extra></extra>",
-            ))
-
-    _fig.update_layout(
-        width=500, height=500,
-        xaxis_title=f"{proj_name} 1",
-        yaxis_title=f"{proj_name} 2",
-        legend=dict(x=1.02, y=1, bgcolor="rgba(255,255,255,0.7)"),
-        margin=dict(l=40, r=120, t=20, b=40),
-        plot_bgcolor="white",
-        dragmode="select",  # box-select tool active by default
-    )
-    _fig.update_xaxes(showgrid=True, gridcolor="#eee", zeroline=False)
-    _fig.update_yaxes(showgrid=True, gridcolor="#eee", zeroline=False)
-
-    scatter_plot = mo.ui.plotly(_fig)
-    return (scatter_plot,)
-
-
-@app.cell
-def _center_scatter(
-    centers,
-    coords_2d,
-    go,
-    mo,
-    np,
-    proj_name,
-    tags,
-):
-    # ── Domain-shift view ────────────────────────────────────────────────
-    # SAME projection coordinates as the class-colored scatter above, but
-    # recolored by acquisition CENTER (hospital / site). Systematic separation
-    # between training centers and the test center indicates domain shift.
-    def _hex_to_rgba(hex_color, alpha=1.0):
-        h = hex_color.lstrip("#")
-        if len(h) == 6:
-            r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-            return f"rgba({r},{g},{b},{alpha})"
-        return hex_color
-
-    _CENTER_COLORS = [
-        "#0072B2", "#E69F00", "#CC79A7", "#56B4E9", "#F0E442",
-        "#009E73", "#D55E00", "#000000",
+def _controls(mo):
+    SLIDE_TITLES = [
+        "0 · The problem & dataset",
+        "1 · Phase 1: backbone × loss",
+        "2 · Phase 2: temperature τ",
+        "3 · Phase 3: balanced sampling",
+        "4 · Phase 4: ROI vs random crops",
+        "5 · Phase 5: head × crop",
+        "6 · Final: best config & conclusions",
     ]
-    _TEST_CENTER_LABEL = "EVC (test center)"
-
-    # Relabel the test split as its own distinct center (most common setup:
-    # train centers vs a held-out test center).
-    _centers = centers.astype(object).copy()
-    _is_test = np.array(["train" not in str(t).lower() for t in tags])
-    _centers[_is_test] = _TEST_CENTER_LABEL
-
-    # Stable color assignment; keep the test center last for a consistent color.
-    _uniq = sorted(set(_centers.tolist()))
-    if _TEST_CENTER_LABEL in _uniq:
-        _uniq.remove(_TEST_CENTER_LABEL)
-        _uniq = _uniq + [_TEST_CENTER_LABEL]
-    _color_of = {lab: _CENTER_COLORS[i % len(_CENTER_COLORS)]
-                 for i, lab in enumerate(_uniq)}
-
-    _fig_c = go.Figure()
-    # train first (under), then test on top
-    for _is_train in (True, False):
-        _alpha = 0.35 if _is_train else 0.95
-        _sym = "circle" if _is_train else "diamond"
-        _lw = 0.3 if _is_train else 1.1
-        _lc = "rgba(255,255,255,0.6)" if _is_train else "#222222"
-        _sz = 6 if _is_train else 8
-        _split_mask = (~_is_test) if _is_train else _is_test
-        for _lab in _uniq:
-            _mask = (_centers == _lab) & _split_mask
-            if not np.any(_mask):
-                continue
-            _split_word = "train" if _is_train else "test"
-            _fig_c.add_trace(go.Scatter(
-                x=coords_2d[_mask, 0], y=coords_2d[_mask, 1],
-                mode="markers",
-                name=f"{_lab} ({_split_word})",
-                marker=dict(
-                    size=_sz, symbol=_sym,
-                    color=_hex_to_rgba(_color_of[_lab], _alpha),
-                    line=dict(width=_lw, color=_lc),
-                ),
-                hovertemplate=f"{_lab} / {_split_word}<extra></extra>",
-            ))
-
-    _fig_c.update_layout(
-        width=500, height=500,
-        xaxis_title=f"{proj_name} 1",
-        yaxis_title=f"{proj_name} 2",
-        legend=dict(x=1.02, y=1, bgcolor="rgba(255,255,255,0.7)"),
-        margin=dict(l=40, r=120, t=20, b=40),
-        plot_bgcolor="white",
+    slide = mo.ui.slider(
+        start=0, stop=6, step=1, value=0, show_value=False,
+        label="Slide", full_width=True,
     )
-    _fig_c.update_xaxes(showgrid=True, gridcolor="#eee", zeroline=False)
-    _fig_c.update_yaxes(showgrid=True, gridcolor="#eee", zeroline=False)
 
-    # If centers never resolved, say so plainly instead of a useless one-color plot.
-    _resolved = set(_uniq) - {"unknown", _TEST_CENTER_LABEL}
-    if _resolved:
-        center_plot = mo.as_html(_fig_c)
-    else:
-        center_plot = mo.md(
-            "ℹ️ *Center labels could not be resolved for this experiment. Save a "
-            "`centers.npy` per split folder, add a `centers` field to "
-            "`meta.json`, or encode the center in the image paths "
-            "(e.g. `.../center_1/...`) to enable this view.*"
-        )
-    return (center_plot,)
+    # A single set of display switches drives whichever slide is visible.
+    # off = class / PCA / projection ; on = center / UMAP / pooled
+    # (Plain top-level switches; marimo tracks these reliably; a dict of
+    # switches does NOT reliably trigger re-render.)
+    col_sw  = mo.ui.switch(value=False, label="colour by center")
+    proj_sw = mo.ui.switch(value=False, label="UMAP")
+    feat_sw = mo.ui.switch(value=False, label="pooled features")
+
+    # Toggle the bottom-right panel between the results table and the PPV@90R
+    # progress chart, to save vertical space.
+    view_sw = mo.ui.radio(
+        options=["PPV@90R progress", "Results table"],
+        value="PPV@90R progress", inline=True,
+    )
+
+    # Tracks which scatter panel was box-selected most recently, so the preview
+    # shows ONLY the last-touched panel's selection.
+    get_last_sel, set_last_sel = mo.state(None)
+
+    return (SLIDE_TITLES, slide, col_sw, proj_sw, feat_sw, view_sw,
+            get_last_sel, set_last_sel)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONFIG: features root + per-phase experiment definitions & result tables
+# ═══════════════════════════════════════════════════════════════════════════════
 @app.cell
-def _plots_layout(center_plot, mo, scatter_plot):
-    plots_layout = mo.hstack(
-        [
-            mo.vstack([
-                mo.md("### Main Projection\n*Box-select to preview source images.*"),
-                scatter_plot
-            ]),
-            mo.vstack([
-                mo.md("### By acquisition center (domain shift)\n*◆ = test (drawn on top), ● = train (translucent).*"),
-                center_plot
-            ])
+def _config(mo):
+    features_root = mo.ui.text(value="features_out", label="Features root directory", full_width=True)
+
+    # Each phase: list of (stem, short title) panels to show on that slide.
+    PHASE_STEMS = {
+        1: [
+            ("P0_Base_GastronetDinoV2_1e-3_t1", "GastroNet DINOv2 · CE"),
+            ("P1_BB_GastronetDinoV2_t1",        "GastroNet DINOv2 · SupPro ✓"),
+            ("P1_BB_DinoV3_t1",                 "DINOv3 · SupPro"),
         ],
-        wrap=True,
-        gap=2.0
-    )
-    plots_layout
-    return (plots_layout,)
-
-
-@app.cell
-def _selection_mask(coords_2d, np, scatter_plot):
-    # scatter_plot.ranges is {"x": [xmin, xmax], "y": [ymin, ymax]} when a box
-    # selection exists, else an empty dict. We compute the mask in Python from
-    # the 2D coords because .indices is unreliable across multi-trace figures.
-    _ranges = scatter_plot.ranges or {}
-    if "x" in _ranges and "y" in _ranges:
-        _xmin, _xmax = _ranges["x"]
-        _ymin, _ymax = _ranges["y"]
-        selection_mask = (
-            (coords_2d[:, 0] >= _xmin) & (coords_2d[:, 0] <= _xmax) &
-            (coords_2d[:, 1] >= _ymin) & (coords_2d[:, 1] <= _ymax)
-        )
-    else:
-        selection_mask = np.zeros(len(coords_2d), dtype=bool)
-    return (selection_mask,)
-
-
-@app.cell
-def _repr_metrics_intro(mo):
-    mo.md(
-        """
-        ## Representation quality metrics
-
-        Following **Mildenberger et al. (2025)**, in addition to standard
-        cluster-distance metrics, we report a metric that compares embeddings
-        *across* classes — it catches representation collapse that within-class
-        metrics miss.
-
-        - **SAD** (Sample Alignment Distance, lower = better): mean L2 distance
-          between an image and its nearest same-class neighbor. Within-class
-          tightness.
-        - **CAD** (Class Alignment Distance, lower = better): mean within-class
-          L2 distance averaged across classes.
-        - **CAC** (Class Alignment Consistency, higher = better, max 1.0): for
-          each sample, what fraction of its top-r% nearest neighbors share its
-          class. The most useful single number — captures whether local
-          neighborhoods are class-pure.
-        - **GPU** (Gaussian Potential Uniformity, lower = better, but remember a
-          too-low value with bad CAC means features are uniform but class-mixed).
-
-        Computed on **L2-normalized** features so distances are on the unit
-        sphere (matching the paper's setup).
-        """
-    )
-    return
-
-
-@app.cell
-def _repr_metrics_table(
-    class_names, features, labels, mo, np, tags,
-):
-    import pandas as _pd
-
-    # One row per dataset split, plus an ALL row. n0/n1 are per-class counts.
-    _rows = []
-
-    def _metrics_row(_group_name, _Xg, _yg):
-        _m = representation_metrics(_Xg, _yg)
-        _npc = _m["n_per_class"]
-        return {
-            "group": _group_name,
-            "n":  _m["n"],
-            "n0": int(_npc.get(0, 0)),
-            "n1": int(_npc.get(1, 0)),
-            "SAD (within, lower better)": _m["SAD"],
-            "CAD (within, lower better)": _m["CAD"],
-            "CAC (cross, higher better)": _m["CAC"],
-            "GPU (uniformity, lower better)": _m["GPU"],
-        }
-
-    # ALL first
-    _rows.append(_metrics_row("ALL", features, labels))
-    # then each dataset tag
-    for _t in sorted(set(tags.tolist())):
-        _mask = tags == _t
-        _rows.append(_metrics_row(str(_t), features[_mask], labels[_mask]))
-
-    repr_metrics_df = _pd.DataFrame(_rows)
-
-    repr_metrics_table = mo.vstack([
-        mo.md("### Per-dataset representation metrics"),
-        mo.ui.table(repr_metrics_df, selection=None),
-        mo.md(
-            "*Read these together. Low SAD/CAD with low CAC = collapsed "
-            "(everything close, classes mixed). High CAC + reasonable GPU = "
-            "clean separation with good spread. A CAC drop on the test set vs. "
-            "the train set quantifies how much structure the model loses "
-            "out-of-distribution.*"
-        ),
-    ])
-    repr_metrics_table
-    return
-
-
-@app.cell
-def _selection_stats(
-    LogisticRegression,
-    StandardScaler,
-    StratifiedKFold,
-    accuracy_score,
-    balanced_accuracy_score,
-    class_names,
-    coords_2d,
-    cross_validate,
-    deployed_probs,
-    features,
-    labels,
-    mo,
-    np,
-    roc_auc_score,
-    selection_mask,
-    tags,
-    threshold,
-):
-    mo.stop(
-        not selection_mask.any(),
-        mo.md(
-            "### Selection statistics\n"
-            "*Box-select points in the scatter to see stats on the selected subset.*"
-        ),
-    )
-
-    _sel = selection_mask
-    _n = int(_sel.sum())
-    _sel_labels = labels[_sel]
-    _sel_probs = deployed_probs[_sel]
-    _sel_tags = tags[_sel]
-
-    # Class & dataset composition
-    _class_counts = {
-        class_names[int(c)]: int((_sel_labels == c).sum())
-        for c in np.unique(_sel_labels)
+        2: [
+            ("P2_Temp_0.07_t1", "τ = 0.07"),
+            ("P2_Temp_0.1_t1",  "τ = 0.10 ✓"),
+            ("P2_Temp_0.3_t1",  "τ = 0.30"),
+            ("P2_Temp_0.5_t1",  "τ = 0.50"),
+        ],
+        3: [
+            ("P6_BalSam_05_Linear", "Balanced 5%"),
+            ("P6_BalSam_25_Linear", "Balanced 25% ✓"),
+            ("P6_BalSam_50_Linear", "Balanced 50%"),
+        ],
+        4: [
+            ("P7_Random_crop04",   "Random 0.4"),
+            ("P7_Random_crop08",   "Random 0.8 ✓"),
+            ("P7_Random_crop1",    "Full image"),
+            ("P7_ROI_crop04",      "ROI 0.4"),
+            ("P7_ROI_crop08_REAL", "ROI 0.8"),
+        ],
+        5: [
+            ("P8_scale04_finetune_knn",  "crop 0.4"),
+            ("P8_scale06_finetune_knn",  "crop 0.6"),
+            ("P8_scale08_finetune_knn",  "crop 0.8"),
+            ("P8_scale095_finetune_knn", "crop 0.95"),
+        ],
+        6: [
+            ("P8_scale095_finetune_knn", "Best · k-NN crop 0.95"),
+        ],
     }
-    _tag_counts = {str(t): int((_sel_tags == t).sum()) for t in np.unique(_sel_tags)}
-
-    # Deployed-model performance on the subset, at the CHOSEN threshold
-    # (slider) — the deployed model's real threshold is unknown. ROC-AUC below
-    # is threshold-free.
-    _thr = float(threshold.value)
-    _preds = (_sel_probs >= _thr).astype(int)
-    _unique_lbls = np.unique(_sel_labels)
-    _acc = accuracy_score(_sel_labels, _preds) if len(_unique_lbls) >= 1 else float("nan")
-    if len(_unique_lbls) >= 2:
-        _bacc = balanced_accuracy_score(_sel_labels, _preds)
-        try:
-            _auc = roc_auc_score(_sel_labels, _sel_probs)
-        except ValueError:
-            _auc = float("nan")
-    else:
-        _bacc = float("nan")
-        _auc = float("nan")
-
-    # 5-fold linear probe on the FULL feature vectors of the subset.
-    # Only meaningful when both classes are present and we have enough samples
-    # per class to stratify into 5 folds.
-    _min_class = (
-        min((_sel_labels == c).sum() for c in _unique_lbls)
-        if len(_unique_lbls) >= 2 else 0
-    )
-    if len(_unique_lbls) >= 2 and _min_class >= 5 and _n >= 20:
-        _scaler = StandardScaler().fit(features[_sel])
-        _X = _scaler.transform(features[_sel])
-        _cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-        _cv_results = cross_validate(
-            LogisticRegression(class_weight="balanced", max_iter=2000),
-            _X, _sel_labels, cv=_cv,
-            scoring=["accuracy", "balanced_accuracy"],
-        )
-        _probe_acc = _cv_results["test_accuracy"].mean()
-        _probe_acc_std = _cv_results["test_accuracy"].std()
-        _probe_bacc = _cv_results["test_balanced_accuracy"].mean()
-        _probe_bacc_std = _cv_results["test_balanced_accuracy"].std()
-        _probe_line = (
-            f"- **Linear probe on subset features** (5-fold CV): "
-            f"acc = {_probe_acc:.3f} ± {_probe_acc_std:.3f}, "
-            f"balanced acc = {_probe_bacc:.3f} ± {_probe_bacc_std:.3f}"
-        )
-    else:
-        _probe_line = (
-            f"- *Linear probe skipped:* need both classes with ≥5 samples each "
-            f"and ≥20 total (have {_n} samples, "
-            f"{len(_unique_lbls)} class(es), min-class={int(_min_class)}).*"
-        )
-
-    # Spatial extent of the selection box
-    _xs = coords_2d[_sel, 0]
-    _ys = coords_2d[_sel, 1]
-    _extent = (
-        f"x ∈ [{_xs.min():.2f}, {_xs.max():.2f}], "
-        f"y ∈ [{_ys.min():.2f}, {_ys.max():.2f}]"
-    )
-
-    _class_str = ", ".join(f"{k}={v}" for k, v in _class_counts.items())
-    _tag_str = ", ".join(f"{k}={v}" for k, v in _tag_counts.items())
-
-    stats_md = mo.md(
-        f"""
-    ### Selection statistics
-
-    - **Selected points:** {_n} &nbsp;&nbsp; **Extent:** {_extent}
-    - **By class:** {_class_str}
-    - **By dataset:** {_tag_str}
-    - **Deployed model on subset @ thr={_thr:.2f}:** acc = {_acc:.3f}, balanced acc = {_bacc:.3f}, ROC-AUC = {_auc:.3f} *(AUC is threshold-free)*
-    {_probe_line}
-    """
-    )
-    stats_md
-    return
-
-
-@app.cell
-def _selection_preview(
-    class_names,
-    deployed_probs,
-    labels,
-    mo,
-    np,
-    paths,
-    selection_mask,
-    tags,
-):
-    import base64
-    from io import BytesIO
-
-    try:
-        from PIL import Image
-        _pil_ok = True
-        _pil_err = None
-    except Exception as _e:
-        _pil_ok = False
-        _pil_err = str(_e)
 
     import pandas as _pd
+    PHASE_TABLES = {
+        1: _pd.DataFrame([
+            {"Backbone": "Gastro DINOv2",   "Loss": "CE", "PPV@90R": 0.0136, "AUROC": 0.825, "AUPRC": 0.379, "Cons.Mass": 0.461},
+            {"Backbone": "Gastro DINOv2",   "Loss": "SP", "PPV@90R": 0.0146, "AUROC": 0.848, "AUPRC": 0.442, "Cons.Mass": 0.568, "Note": "✓ best"},
+            {"Backbone": "Gastro SimCLR",   "Loss": "CE", "PPV@90R": 0.0105, "AUROC": 0.711, "AUPRC": 0.132, "Cons.Mass": 0.541},
+            {"Backbone": "Gastro SimCLR",   "Loss": "SP", "PPV@90R": 0.0121, "AUROC": 0.824, "AUPRC": 0.197, "Cons.Mass": 0.412},
+            {"Backbone": "Gastro MoCo",     "Loss": "CE", "PPV@90R": 0.0113, "AUROC": 0.747, "AUPRC": 0.175, "Cons.Mass": 0.609},
+            {"Backbone": "Gastro MoCo",     "Loss": "SP", "PPV@90R": 0.0114, "AUROC": 0.703, "AUPRC": 0.131, "Cons.Mass": 0.528},
+            {"Backbone": "Gastro ResNet50", "Loss": "CE", "PPV@90R": 0.0106, "AUROC": 0.645, "AUPRC": 0.049, "Cons.Mass": 0.401},
+            {"Backbone": "Gastro ResNet50", "Loss": "SP", "PPV@90R": 0.0100, "AUROC": 0.585, "AUPRC": 0.095, "Cons.Mass": 0.272},
+            {"Backbone": "DINOv3",          "Loss": "CE", "PPV@90R": 0.0103, "AUROC": 0.700, "AUPRC": 0.113, "Cons.Mass": 0.467},
+            {"Backbone": "DINOv3",          "Loss": "SP", "PPV@90R": 0.0097, "AUROC": 0.687, "AUPRC": 0.100, "Cons.Mass": 0.408},
+        ]),
+        2: _pd.DataFrame([
+            {"Temperature": "0.07", "PPV@90R": 0.012, "AUROC": 0.83, "AUPRC": 0.43, "Cons.Mass": 0.26},
+            {"Temperature": "0.10", "PPV@90R": 0.015, "AUROC": 0.89, "AUPRC": 0.56, "Cons.Mass": 0.70, "Note": "✓ best"},
+            {"Temperature": "0.30", "PPV@90R": 0.012, "AUROC": 0.85, "AUPRC": 0.52, "Cons.Mass": 0.39},
+            {"Temperature": "0.50", "PPV@90R": 0.011, "AUROC": 0.84, "AUPRC": 0.52, "Cons.Mass": 0.65},
+        ]),
+        3: _pd.DataFrame([
+            {"Positive share": "5%",  "PPV@90R": 0.010, "AUROC": 0.83, "AUPRC": 0.52, "Cons.Mass": 0.32},
+            {"Positive share": "25%", "PPV@90R": 0.015, "AUROC": 0.87, "AUPRC": 0.50, "Cons.Mass": 0.33, "Note": "✓ best"},
+            {"Positive share": "50%", "PPV@90R": 0.013, "AUROC": 0.86, "AUPRC": 0.53, "Cons.Mass": 0.24},
+        ]),
+        4: _pd.DataFrame([
+            {"Cropping Strategy": "Random Crop (0.4)", "PPV@90R": 0.014, "AUROC": 0.86, "AUPRC": 0.47, "Cons.Mass": 0.75},
+            {"Cropping Strategy": "Random Crop (0.8)", "PPV@90R": 0.017, "AUROC": 0.89, "AUPRC": 0.49, "Cons.Mass": 0.59, "Note": "✓ best PPV"},
+            {"Cropping Strategy": "Full Image",        "PPV@90R": 0.016, "AUROC": 0.89, "AUPRC": 0.51, "Cons.Mass": 0.65},
+            {"Cropping Strategy": "ROI Crop (0.4)",    "PPV@90R": 0.013, "AUROC": 0.86, "AUPRC": 0.50, "Cons.Mass": 0.67},
+            {"Cropping Strategy": "ROI Crop (0.8)",    "PPV@90R": 0.014, "AUROC": 0.87, "AUPRC": 0.53, "Cons.Mass": 0.71},
+        ]),
+        5: _pd.DataFrame([
+            {"Best Configuration": "Linear (0.60)", "PPV@90R": 0.015, "AUROC": 0.88, "AUPRC": 0.57, "Cons.Mass": 0.66},
+            {"Best Configuration": "k-NN (0.95)",   "PPV@90R": 0.039, "AUROC": 0.79, "AUPRC": 0.50, "Cons.Mass": None, "Note": "✓ best PPV"},
+            {"Best Configuration": "MLP (0.60)",    "PPV@90R": 0.013, "AUROC": 0.86, "AUPRC": 0.52, "Cons.Mass": 0.64},
+            {"Best Configuration": "SVM (0.95)",    "PPV@90R": 0.016, "AUROC": 0.90, "AUPRC": 0.56, "Cons.Mass": None, "Note": "best AUROC"},
+        ]),
+    }
+    return (features_root, PHASE_STEMS, PHASE_TABLES)
 
-    mo.stop(
-        not selection_mask.any(),
-        mo.md(
-            "### Selection preview\n"
-            "*Box-select points in the scatter plot above to preview their images.*"
-        ),
-    )
 
-    _sel_idx = np.where(selection_mask)[0]
-    _n_total = len(_sel_idx)
-    _max_preview = 12
-    _preview_idx = _sel_idx[:_max_preview]
+# ═══════════════════════════════════════════════════════════════════════════════
+# DATA: load all phase bundles + build stable views (positions fixed here)
+# ═══════════════════════════════════════════════════════════════════════════════
+@app.cell
+def _load_all(Path, features_root, mo, col_sw, proj_sw, feat_sw, PHASE_STEMS,
+              ov_load_experiment, build_phase_view):
+    _root = Path(features_root.value).expanduser()
 
-    _thumbs_html = []
-    if not _pil_ok:
-        _thumbs_html.append(
-            f'<div style="color:red;">Pillow not installed: {_pil_err}. '
-            f'Install with `pip install Pillow` to see thumbnails.</div>'
+    # Projection + feature kind apply globally (driven by the single switches).
+    _pm = "UMAP" if proj_sw.value else "PCA"
+    _fk = "pooled" if feat_sw.value else "projection"
+
+    phase_views = {}      # phase -> list of (title, view_or_None)
+    for _ph, _panels in PHASE_STEMS.items():
+        _views = []
+        for _stem, _title in _panels:
+            _b = ov_load_experiment(_root, _stem, _fk)
+            if _b is None or _b["features"].shape[0] < 4:
+                _views.append((_title, None))
+            else:
+                _views.append((_title, build_phase_view(_b, proj_method=_pm)))
+        phase_views[_ph] = _views
+
+    return (phase_views,)
+
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CURRENT-SLIDE WIDGETS: built as TRACKED cell globals so box-select .ranges works
+# ═══════════════════════════════════════════════════════════════════════════════
+@app.cell
+def _slide_widgets(mo, slide, col_sw, phase_views, render_phase_fig, set_last_sel):
+    _s = int(slide.value)
+    _cb = "center" if col_sw.value else "class"
+
+    # Reset "last selected" whenever the slide or colouring changes (the old
+    # panels no longer exist).
+    set_last_sel(None)
+
+    # marimo tracks reactivity per top-level variable. A *list* of widgets does
+    # NOT propagate a child's box-select to dependent cells, so each plotly widget
+    # must be its own named global. We use 6 fixed slots (pw0..pw5): phase slides
+    # use up to 5; the final slide uses pw0 (by class) and pw1 (by center).
+    pw0 = pw1 = pw2 = pw3 = pw4 = pw5 = None
+    pp0 = pp1 = pp2 = pp3 = pp4 = pp5 = None
+    cur_titles = []
+    cur_kind = "info"
+
+    def _mk(view, title, cb, slot, w=200, h=200):
+        _fig, _pl = render_phase_fig(view, title, color_by=cb, width=w, height=h)
+        # When this panel is box-selected, record its slot as the last touched.
+        _w = mo.ui.plotly(_fig, on_change=lambda _v, _i=slot: set_last_sel(_i))
+        return _w, _pl
+
+    if 1 <= _s <= 5:
+        cur_kind = "phase"
+        _panels = phase_views[_s]
+        _slots = []
+        for _slot, (_title, _view) in enumerate(_panels[:6]):
+            cur_titles.append(_title)
+            if _view is None:
+                _slots.append((None, None))
+            else:
+                _slots.append(_mk(_view, _title, _cb, _slot))
+        # pad to 6
+        while len(_slots) < 6:
+            _slots.append((None, None))
+        (pw0, pp0), (pw1, pp1), (pw2, pp2), (pw3, pp3), (pw4, pp4), (pw5, pp5) = _slots
+
+    elif _s == 6:
+        cur_kind = "final"
+        _title6, _view6 = phase_views[6][0]
+        if _view6 is not None:
+            pw0, pp0 = _mk(_view6, "Best · by class",  "class",  0, 300, 300)
+            pw1, pp1 = _mk(_view6, "Best · by center", "center", 1, 300, 300)
+            cur_titles = ["Best · by class", "Best · by center"]
+
+    return (pw0, pw1, pw2, pw3, pw4, pw5,
+            pp0, pp1, pp2, pp3, pp4, pp5,
+            cur_titles, cur_kind)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PREVIEW: references every named widget so a box-select on ANY re-runs this cell
+# ═══════════════════════════════════════════════════════════════════════════════
+@app.cell
+def _slide_preview(mo, pw0, pw1, pw2, pw3, pw4, pw5,
+                   pp0, pp1, pp2, pp3, pp4, pp5, get_last_sel, render_range_preview):
+    _widgets = [pw0, pw1, pw2, pw3, pw4, pw5]
+    _plotted = [pp0, pp1, pp2, pp3, pp4, pp5]
+    # Build the full 6-slot panel list (so prefer_index lines up with slot index).
+    _panels = [
+        (_plotted[_i], getattr(_widgets[_i], "ranges", None) if _widgets[_i] is not None else None)
+        for _i in range(6)
+    ]
+    cur_preview = render_range_preview(_panels, mo, prefer_index=get_last_sel())
+    return (cur_preview,)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DASHBOARD LAYOUT (matches the sketch): header → toggles+legend → images
+#   → [preview | table | PPV@90R] → slider at the bottom.
+# ═══════════════════════════════════════════════════════════════════════════════
+@app.cell
+def _dashboard(mo, slide, SLIDE_TITLES, col_sw, proj_sw, feat_sw, view_sw,
+               phase_views, PHASE_TABLES, features_root,
+               progress_chart, phase_legend_html, example_images_html, md_inline,
+               pw0, pw1, pw2, pw3, pw4, pw5, cur_titles, cur_kind, cur_preview):
+    _s = int(slide.value)
+    _slot_widgets = [pw0, pw1, pw2, pw3, pw4, pw5]
+    _active = [w for w in _slot_widgets if w is not None]
+
+    # Pair each active widget with its caption (titles never clip this way, unlike
+    # an in-plot title on a narrow panel).
+    def _captioned(widgets, titles, font=14):
+        _cols = []
+        for _w, _t in zip(widgets, titles):
+            _cols.append(mo.vstack([
+                mo.Html(f"<div style='text-align:center;font-weight:600;"
+                        f"font-size:{font}px;margin-bottom:2px;'>{_t}</div>"),
+                _w,
+            ], gap=0.1))
+        return _cols
+
+    _toggles = mo.hstack([
+        mo.md("**class ↔ center:**"), col_sw,
+        mo.md("&nbsp;&nbsp;**PCA ↔ UMAP:**"), proj_sw,
+        mo.md("&nbsp;&nbsp;**proj ↔ pooled:**"), feat_sw,
+    ], justify="start", gap=0.4, wrap=True)
+
+    _slider_bar = mo.vstack([
+        slide,
+        mo.md("<span style='font-size:11px;color:#888;'>Drag the slider to move through the 7 slides.</span>"),
+    ])
+
+    _EXPLAIN = {
+        1: ("Phase 1 · backbone × loss",
+            "**What:** frozen backbones × loss (CE vs SupPro) as feature extractors.",
+            "**Conclusion:** GastroNet DINOv2 + SupPro separates by *class* and mixes *centers* "
+            "(good); DINOv3 sorts by center. Domain-specific pretraining wins.",
+            "⚠️ Phase 1 predates the data-leakage fix, read as *directionally informative*; "
+            "Phase 5 has the clean LOCO numbers.", "warn"),
+        2: ("Phase 2 · temperature τ",
+            "**What:** sweeping the SupPro temperature τ ∈ {0.07, 0.10, 0.30, 0.50}.",
+            "**Conclusion:** τ = 0.10 gives the cleanest geometry and best metrics "
+            "(consensus-mass 0.26 → 0.70).",
+            "⚠️ Still pre-LOCO; treat absolute values as indicative, trends as reliable.", "warn"),
+        3: ("Phase 3 · balanced sampling",
+            "**What:** forcing a fixed share of positives per batch so SupPro always has positive pairs.",
+            "**Conclusion:** 25% generalised best; 5% has too few positives, 50% over-samples and collapses.",
+            "⚠️ The 50/50 run hit a perfect 1.0 on validation, a symptom of the patient-level "
+            "leakage later fixed with LOCO.", "warn"),
+        4: ("Phase 4 · ROI vs random crops",
+            "**What:** ROI-guided crops vs random crops at two scales, plus full image.",
+            "**Conclusion:** inconclusive: every strategy lands in the same narrow PPV band, "
+            "pointing to the head and leakage as the real bottleneck.",
+            "⚠️ Pre-LOCO; the flat differences here partly reflect the unresolved leakage.", "warn"),
+        5: ("Phase 5 · head × crop",
+            "**What:** with **LOCO** + deterministic training, sweeping the **crop scale** "
+            "(0.4 → 0.95). The scatter panels below show the feature space at each crop scale. "
+            "these are *identical across all classifier heads* (k-NN, SVM, Linear, MLP), since the "
+            "head is trained on top of the same frozen features. The head is chosen separately.",
+            "**Conclusion:** **k-NN won.** Non-parametric heads read SupPro's clusters directly; "
+            "k-NN at crop 0.95 peaks at **PPV@90R = 0.039**, the single biggest win, beating SVM, "
+            "Linear, and MLP. Use the **Results table** toggle below to compare heads.",
+            "✅ Phase 5 uses leave-one-center-out splits, so validation tracks the hidden server.", "success"),
+    }
+
+    # ---- SLIDE 0 : problem & dataset ---------------------------------------
+    if _s == 0:
+        _hero_html = """
+        <div style="background:linear-gradient(135deg,#0b3d5c 0%,#0072B2 100%);
+                    border-radius:14px;padding:26px 30px;color:white;margin-bottom:18px;">
+          <div style="font-size:32px;font-weight:700;line-height:1.2;margin-bottom:10px;">
+            Detecting early neoplasia in Barrett's Esophagus
+          </div>
+          <div style="font-size:18px;line-height:1.55;opacity:0.95;max-width:1150px;">
+            Barrett's Esophagus can progress to esophageal cancer, so patients are screened for
+            early <b>neoplasia</b>. The catch: lesions are <b>extremely rare</b> and look a lot like
+            normal folds, vessels, and light reflections, so a detector has to be precise without
+            drowning clinicians in false alarms.
+          </div>
+        </div>
+        """
+        _rare_html = """
+        <div style="background:#eef4fb;border-left:5px solid #0072B2;border-radius:10px;
+                    padding:16px 20px;margin-bottom:18px;font-size:16px;line-height:1.55;color:#234;">
+          <b>The RARE26 challenge.</b> Part of the EndoVis framework, RARE26 benchmarks early-neoplasia
+          detection in Barrett's Esophagus under <i>realistic low-prevalence</i> conditions. Last year's
+          top methods leaned on heavy model ensembles and still produced too many false positives;
+          RARE26 pushes for models that stay accurate <i>and</i> deployable across hospitals. Primary
+          metric: <b>PPV@90Recall</b> (precision when catching 90% of lesions).
+        </div>
+        """
+        # Single card holding the "biggest struggle" copy on the left and the
+        # imbalance bar chart on the right, so there is no awkward empty gap.
+        _struggle_card = """
+        <div style="border:1px solid #e3e3e3;border-radius:12px;padding:20px 24px;
+                    background:#fafafa;margin-bottom:18px;
+                    display:flex;gap:32px;align-items:center;flex-wrap:wrap;">
+          <div style="flex:1;min-width:320px;font-size:17px;line-height:1.7;color:#333;">
+            <div style="font-size:20px;font-weight:700;color:#b3450f;margin-bottom:8px;">
+              The single biggest struggle: class imbalance
+            </div>
+            <ul style="margin:0;padding-left:20px;">
+              <li><b>&asymp; 5%</b> neoplasia in training, <b>&lt; 1%</b> in real practice</li>
+              <li><b>19 : 1</b> ratio, so most batches contain almost no positives</li>
+              <li>standard models over-predict "healthy", giving <b>too many false alarms</b></li>
+            </ul>
+          </div>
+          <div style="flex:0 0 auto;text-align:center;">
+            <div style="display:flex;align-items:flex-end;gap:30px;height:190px;justify-content:center;">
+              <div style="text-align:center;">
+                <div style="width:96px;height:180px;background:#009E73;border-radius:8px 8px 0 0;"></div>
+                <div style="font-size:15px;margin-top:6px;"><b>NDBE</b><br>2937</div>
+              </div>
+              <div style="text-align:center;">
+                <div style="width:96px;height:10px;background:#D55E00;border-radius:8px 8px 0 0;"></div>
+                <div style="font-size:15px;margin-top:6px;"><b>neoplasia</b><br>158</div>
+              </div>
+            </div>
+            <div style="font-size:13px;color:#888;margin-top:8px;">&asymp; 5% prevalence &middot; 19:1 ratio</div>
+          </div>
+        </div>
+        """
+        _body = mo.vstack([
+            mo.Html(_hero_html),
+            mo.Html(_rare_html),
+            mo.Html(_struggle_card),
+            mo.Html("<div style='font-size:19px;font-weight:700;margin:4px 0 6px 0;'>"
+                    "What the data looks like: NDBE vs neoplasia</div>"),
+            example_images_html(features_root.value, mo, thumb_px=110, n_each=4),
+            mo.Html("<div style='font-size:13px;color:#888;margin-top:4px;'>"
+                    "Data: RARE26 challenge (CC-BY-NC-SA). Two Dutch centers &middot; "
+                    "internal test = EndoVisSub-Barrett (100 images, 5-expert masks).</div>"),
+        ], gap=0.3)
+        _out = mo.vstack([_body, mo.md("---"), _slider_bar])
+
+    # ---- SLIDES 1..5 : phase results (sketch layout) -----------------------
+    elif 1 <= _s <= 5:
+        _phase_title, _what, _concl, _disc, _disc_kind = _EXPLAIN[_s]
+        _legend = mo.Html(phase_legend_html("center" if col_sw.value else "class"))
+
+        # Header: phase title + What + Conclusion together in ONE block, larger
+        # text for presentation.
+        _header = mo.Html(
+            f"<div style='font-size:17px;line-height:1.5;'>"
+            f"<div style='font-size:24px;font-weight:600;margin-bottom:6px;'>{_phase_title}</div>"
+            f"<div style='margin-bottom:4px;'>{md_inline(_what)}</div>"
+            f"<div>{md_inline(_concl)}</div>"
+            f"</div>"
         )
+
+        # Toggles (left)  |  Legend (right)
+        _toggle_legend = mo.hstack([
+            _toggles, _legend,
+        ], justify="space-between", gap=1.0, align="start", widths=[3, 2], wrap=True)
+
+        # Big images row: horizontal, side by side (no wrap), each captioned.
+        _images = mo.hstack(_captioned(_active, cur_titles, font=15),
+                            justify="start", gap=0.5, wrap=False)
+
+        # Bottom-right panel toggles between the table and the PPV@90R chart.
+        if view_sw.value == "Results table":
+            _right_panel = mo.vstack([mo.md("**Results**"),
+                                      mo.ui.table(PHASE_TABLES[_s], selection=None, pagination=False)])
+        else:
+            _right_panel = mo.vstack([mo.md("**PPV@90Recall progress**"),
+                                      mo.as_html(progress_chart(reveal_up_to=(_s + 2)))])
+
+        # Bottom row: preview | view-toggle + (table OR chart)
+        _bottom = mo.hstack([
+            mo.vstack([mo.md("**Box-select preview**"), cur_preview]),
+            mo.vstack([view_sw, _right_panel]),
+        ], justify="start", gap=1.5, align="start", widths=[1, 2], wrap=False)
+
+        _out = mo.vstack([
+            _header,
+            _toggle_legend,
+            _images,
+            _bottom,
+            _slider_bar,
+            # Disclaimer sits BELOW the slider line (may run slightly off-screen).
+            mo.callout(mo.md(_disc), kind=_disc_kind),
+        ])
+
+    # ---- SLIDE 6 : final --------------------------------------------------
     else:
-        for _i in _preview_idx:
-            _p = str(paths[_i])
-            try:
-                with Image.open(_p) as _im:
-                    _im = _im.convert("RGB")
-                    _im.thumbnail((96, 96))
-                    _buf = BytesIO()
-                    _im.save(_buf, format="PNG")
-                    _b64 = base64.b64encode(_buf.getvalue()).decode("ascii")
-                _img_tag = (
-                    f'<img src="data:image/png;base64,{_b64}" '
-                    f'style="display:block;margin:auto;">'
-                )
-            except Exception as _e:
-                _img_tag = (
-                    f'<div style="color:red;font-size:10px;">'
-                    f'err: {type(_e).__name__}</div>'
-                )
-            _caption = (
-                f'<div style="font-size:10px;text-align:center;margin-top:4px;">'
-                f'<b>{class_names[int(labels[_i])]}</b><br>'
-                f'{tags[_i]}<br>'
-                f'p={float(deployed_probs[_i]):.2f}'
-                f'</div>'
-            )
-            _thumbs_html.append(
-                f'<div style="border:1px solid #ddd;padding:4px;border-radius:4px;'
-                f'background:white;">{_img_tag}{_caption}</div>'
-            )
+        _legend = mo.Html(phase_legend_html("both"))
+        _concl = mo.Html(
+            "<div style='font-size:17px;line-height:1.55;'>"
+            "<div style='font-size:26px;font-weight:700;margin-bottom:8px;'>Final configuration &amp; conclusions</div>"
+            "<b>Best pipeline:</b> GastroNet DINOv2 · SupPro (τ = 0.10) · 20% balanced sampling · "
+            "crop 0.95 · <b>k-NN (k=5)</b> head →"
+            "Internal validation peaked at PPV@90R = 0.039. On the hidden test server, our model scored 0.0405 (RARE25) and 0.0223 (RARE26)."
+            "<ol style='margin:8px 0 0 0;'>"
+            "<li><b>Domain-specific pretraining wins</b>: GastroNet DINOv2 separates by <i>class</i>, not <i>center</i>.</li>"
+            "<li><b>The head matters as much as the backbone</b>: non-parametric k-NN/SVM can clssify SupPro's "
+            "clusters better than parametric alternatives.</li>"
+            "</ol>"
+            "<div style='margin-top:8px;color:#a33;'>⚠️ <b>Not yet clinical:</b> 0.0405 ≈ 1 true positive per 25 false alarms.</div>"
+            "</div>"
+        )
 
-    _grid = (
-        '<div style="display:grid;grid-template-columns:repeat(6,1fr);'
-        'gap:8px;margin-top:8px;">'
-        + "".join(_thumbs_html)
-        + "</div>"
-    )
+        # RARE25 / RARE26 comparison table (from the report's Table IX).
+        _rare_table_html = """
+        <div style="font-size:16px;margin-top:6px;">
+          <div style="font-weight:600;margin-bottom:6px;">Performance comparison on RARE25 and RARE26</div>
+          <table style="border-collapse:collapse;font-size:15px;">
+            <tr style="border-bottom:2px solid #333;">
+              <th style="text-align:left;padding:6px 16px;">Challenge</th>
+              <th style="text-align:left;padding:6px 16px;">Submission</th>
+              <th style="padding:6px 16px;">PPV@90R</th>
+              <th style="padding:6px 16px;">AUROC</th>
+              <th style="padding:6px 16px;">AUPRC</th></tr>
+            <tr><td style="padding:6px 16px;">RARE25</td><td style="padding:6px 16px;">Ours</td>
+              <td style="text-align:center;"><b>0.0405</b></td><td style="text-align:center;">0.7915</td><td style="text-align:center;"><b>0.5048</b></td></tr>
+            <tr style="border-bottom:1px solid #ccc;"><td style="padding:6px 16px;">RARE25</td><td style="padding:6px 16px;">1st place 2025</td>
+              <td style="text-align:center;">0.0355</td><td style="text-align:center;"><b>0.9215</b></td><td style="text-align:center;">0.4857</td></tr>
+            <tr><td style="padding:6px 16px;">RARE26</td><td style="padding:6px 16px;">Ours</td>
+              <td style="text-align:center;"><b>0.0223</b></td><td style="text-align:center;">0.6906</td><td style="text-align:center;">0.2104</td></tr>
+            <tr><td style="padding:6px 16px;">RARE26</td><td style="padding:6px 16px;">1st place 2025</td>
+              <td style="text-align:center;">0.0152</td><td style="text-align:center;"><b>0.8030</b></td><td style="text-align:center;"><b>0.2937</b></td></tr>
+          </table>
+          <div style="font-size:13px;color:#666;margin-top:6px;">A single model, beats the 2025 winner on PPV@90R for both challenges which used an ensemble.</div>
+        </div>
+        """
+        _images = mo.hstack(_captioned(_active, cur_titles, font=16),
+                            justify="start", gap=1.0, wrap=False)
+        _bottom = mo.hstack([
+            mo.vstack([mo.md("**Box-select preview**"), cur_preview]),
+            mo.vstack([mo.Html(_rare_table_html)]),
+        ], justify="start", gap=1.5, align="start", widths=[1, 2], wrap=False)
 
-    _df = _pd.DataFrame({
-        "path": [str(paths[i]) for i in _sel_idx],
-        "label": [class_names[int(labels[i])] for i in _sel_idx],
-        "dataset": [tags[i] for i in _sel_idx],
-        "p(class 1)": [float(deployed_probs[i]) for i in _sel_idx],
-    })
+        _out = mo.vstack([
+            _concl,
+            mo.Html("<div style='font-size:17px;font-weight:600;margin-top:6px;'>"
+                    "Best feature space: same points, by class (left) and center (right):</div>"),
+            _images,
+            _legend,
+            _bottom,
+            _slider_bar,
+        ])
 
-    preview_view = mo.vstack([
-        mo.md(
-            f"### Selection preview\n"
-            f"**{_n_total} points selected.** "
-            f"Showing first {min(_n_total, _max_preview)} thumbnails."
-        ),
-        mo.Html(_grid),
-        mo.md("**Full selection table:**"),
-        mo.ui.table(_df),
-    ])
-    preview_view
+    _out
     return
-
-
-@app.cell
-def _confusion_and_hist(
-    class_names, deployed_probs, go, labels, mo, np, roc_auc_score, threshold
-):
-    _CLASS_COLORS = ["#009E73", "#D55E00", "#0072B2", "#E69F00", "#CC79A7", "#56B4E9", "#F0E442", "#000000"]
-    
-    # ── Threshold note ────────────────────────────────────────────────────
-    # The deployed model's true operating threshold is UNKNOWN. The confusion
-    # matrix below is computed at a *chosen* threshold (the slider), purely for
-    # exploration. The ROC curve and ROC-AUC are threshold-free and are the
-    # trustworthy summary of the deployed probabilities.
-    _thr = float(threshold.value)
-    _preds = (deployed_probs >= _thr).astype(int)
-
-    from sklearn.metrics import confusion_matrix, roc_curve
-    _cm = confusion_matrix(labels, _preds, labels=list(range(len(class_names))))
-
-    _fig_cm = go.Figure(data=go.Heatmap(
-        z=_cm,
-        x=[f"Pred {c}" for c in class_names],
-        y=[f"True {c}" for c in class_names],
-        text=_cm,
-        texttemplate="%{text}",
-        textfont=dict(size=14),
-        colorscale="Blues",
-        showscale=False,
-    ))
-    _fig_cm.update_layout(
-        title=dict(text=f"Confusion Matrix @ thr={_thr:.2f}<br><sub>chosen, NOT deployed</sub>",
-                   font=dict(size=14), x=0.5, xanchor="center"),
-        autosize=True, height=380,
-        margin=dict(l=60, r=20, t=60, b=50),
-        plot_bgcolor="white", paper_bgcolor="white",
-    )
-    _fig_cm.update_yaxes(autorange="reversed")
-
-    # ── Probability histogram (threshold-free), with the chosen cut-off drawn
-    _fig_hist = go.Figure()
-    for _i, _cls in enumerate(class_names):
-        _fig_hist.add_trace(go.Histogram(
-            x=deployed_probs[labels == _i],
-            name=f"True {_cls}",
-            opacity=0.7,
-            nbinsx=20,
-            marker_color=_CLASS_COLORS[_i % len(_CLASS_COLORS)]
-        ))
-    _fig_hist.add_vline(
-        x=_thr, line=dict(color="black", dash="dash", width=2),
-        annotation_text=f"thr={_thr:.2f}", annotation_position="top",
-    )
-    _fig_hist.update_layout(
-        title=dict(text="Model confidence<br><sub>p(class 1)</sub>",
-                   font=dict(size=14), x=0.5, xanchor="center"),
-        barmode="overlay",
-        xaxis_title="Predicted probability",
-        yaxis_title="Number of images",
-        autosize=True, height=380,
-        margin=dict(l=60, r=20, t=60, b=50),
-        plot_bgcolor="white", paper_bgcolor="white",
-        legend=dict(x=0.98, y=0.98, xanchor="right", yanchor="top",
-                    bgcolor="rgba(255,255,255,0.6)", font=dict(size=10)),
-    )
-
-    # ── ROC curve (threshold-free) ────────────────────────────────────────
-    # Only well-defined when both classes are present.
-    _has_both = len(np.unique(labels)) >= 2
-    if _has_both:
-        _fpr, _tpr, _ = roc_curve(labels, deployed_probs)
-        _auc = roc_auc_score(labels, deployed_probs)
-        _fig_roc = go.Figure()
-        _fig_roc.add_trace(go.Scatter(
-            x=_fpr, y=_tpr, mode="lines",
-            name=f"ROC (AUC={_auc:.3f})",
-            line=dict(color="#0072B2", width=2),
-        ))
-        # Mark the operating point at the chosen threshold
-        _tp = int(((deployed_probs >= _thr) & (labels == 1)).sum())
-        _fn = int(((deployed_probs < _thr) & (labels == 1)).sum())
-        _fp = int(((deployed_probs >= _thr) & (labels == 0)).sum())
-        _tn = int(((deployed_probs < _thr) & (labels == 0)).sum())
-        _tpr_pt = _tp / (_tp + _fn) if (_tp + _fn) else 0.0
-        _fpr_pt = _fp / (_fp + _tn) if (_fp + _tn) else 0.0
-        _fig_roc.add_trace(go.Scatter(
-            x=[_fpr_pt], y=[_tpr_pt], mode="markers",
-            name=f"@ thr={_thr:.2f}",
-            marker=dict(color="black", size=10, symbol="x"),
-        ))
-        _fig_roc.add_trace(go.Scatter(
-            x=[0, 1], y=[0, 1], mode="lines",
-            name="chance", line=dict(color="#aaa", dash="dot"),
-            showlegend=False,
-        ))
-        _fig_roc.update_layout(
-            title=dict(text="ROC curve<br><sub>threshold-free</sub>",
-                       font=dict(size=14), x=0.5, xanchor="center"),
-            xaxis_title="False positive rate",
-            yaxis_title="True positive rate",
-            autosize=True, height=380,
-            margin=dict(l=60, r=20, t=60, b=50),
-            plot_bgcolor="white", paper_bgcolor="white",
-            legend=dict(x=0.97, y=0.05, xanchor="right", yanchor="bottom",
-                        bgcolor="rgba(255,255,255,0.6)", font=dict(size=10)),
-        )
-        _fig_roc.update_xaxes(range=[-0.02, 1.02], constrain="domain")
-        _fig_roc.update_yaxes(range=[-0.02, 1.02], scaleanchor="x", scaleratio=1)
-    else:
-        _fig_roc = go.Figure()
-        _fig_roc.add_annotation(
-            text="ROC needs both classes present",
-            showarrow=False, x=0.5, y=0.5, xref="paper", yref="paper",
-        )
-        _fig_roc.update_layout(title=dict(text="ROC curve<br><sub>threshold-free</sub>",
-                                          font=dict(size=14), x=0.5, xanchor="center"),
-                               autosize=True, height=380,
-                               margin=dict(l=60, r=20, t=60, b=50))
-
-    confusion_view = mo.vstack([
-        mo.md(
-            "### Deployed-model diagnostics\n"
-            "The confusion matrix uses the **chosen** slider threshold — the "
-            "deployed model's real threshold is unknown. The **ROC curve and "
-            "AUC are threshold-free** and are the reliable summary; the ✕ marks "
-            "where the chosen threshold sits on the curve."
-        ),
-        threshold,
-        mo.hstack(
-            [mo.as_html(_fig_cm), mo.as_html(_fig_hist), mo.as_html(_fig_roc)],
-            widths="equal", gap=1.0, align="stretch",
-        ),
-    ])
-    confusion_view
-    return (confusion_view,)
-
-
-@app.cell
-def _comparison_table(experiment_picker, json, mo, stem_to_dirs):
-    _selected_dirs = stem_to_dirs.get(experiment_picker.value, [])
-
-    rows = []
-    for d in _selected_dirs:
-        probe_file = d / "linear_probe.json"
-        if not probe_file.exists():
-            continue
-        result = json.loads(probe_file.read_text())
-        rows.append({
-            "Dataset": result.get("dataset_tag", d.name),
-            "deployed_acc": result["deployed"]["accuracy"],
-            "deployed_bal_acc": result["deployed"]["balanced_accuracy"],
-            "deployed_auc": result["deployed"].get("roc_auc"),
-            "pooled_probe_bal_acc": result["post_hoc_pooled"]["balanced_accuracy_mean"],
-            "pooled_probe_auc": result["post_hoc_pooled"].get("roc_auc_mean"),
-            "proj_probe_bal_acc": result["post_hoc_projection"]["balanced_accuracy_mean"],
-            "proj_probe_auc": result["post_hoc_projection"].get("roc_auc_mean"),
-        })
-    if not rows:
-        _view = mo.md(
-            "*Run `python linear_probe.py` on these folders to populate the "
-            "linear separability comparison table here.*"
-        )
-    else:
-        import pandas as _pd
-        df = _pd.DataFrame(rows)
-        _view = mo.vstack([mo.md("## Linear separability comparison"), mo.ui.table(df)])
-    _view
-    return
-
-
-@app.cell
-def _cmp_controls(experiment_stems, mo):
-    mo.md("---")
-    cmp_intro = mo.md(
-        "## Side-by-side checkpoint comparison\n"
-        "Pick **two experiments** to view their representation spaces next to "
-        "each other. Each panel is projected **independently** (its own PCA/UMAP "
-        "fit on its own features), so compare *cluster geometry* — separation, "
-        "train/test overlap, tightness — rather than absolute coordinates. The "
-        "deployed **ROC-AUC** under each panel is the threshold-free, comparable "
-        "number."
-    )
-
-    _default_b = experiment_stems[1] if len(experiment_stems) > 1 else experiment_stems[0]
-    cmp_a = mo.ui.dropdown(
-        options=experiment_stems, value=experiment_stems[0], label="Checkpoint A",
-    )
-    cmp_b = mo.ui.dropdown(
-        options=experiment_stems, value=_default_b, label="Checkpoint B",
-    )
-    cmp_feature_picker = mo.ui.dropdown(
-        options=["pooled (768-D, paper's r)", "projection (128-D, paper's z)"],
-        value="pooled (768-D, paper's r)",
-        label="Features",
-    )
-    cmp_proj_picker = mo.ui.dropdown(
-        options=["PCA", "UMAP"], value="PCA", label="Projection (per panel)",
-    )
-
-    cmp_controls = mo.vstack([
-        cmp_intro,
-        mo.hstack([cmp_a, cmp_b]),
-        mo.hstack([cmp_proj_picker, cmp_feature_picker]),
-    ])
-    cmp_controls
-    return cmp_a, cmp_b, cmp_feature_picker, cmp_proj_picker
-
-
-@app.cell
-def _cmp_view(
-    cmp_a,
-    cmp_b,
-    cmp_feature_picker,
-    cmp_proj_picker,
-    metric,
-    min_dist,
-    mo,
-    n_neighbors,
-    seed,
-    stem_to_dirs,
-):
-    import pandas as _pd
-
-    _feature_kind = (
-        "pooled" if cmp_feature_picker.value.startswith("pooled") else "projection"
-    )
-
-    def _panel(_stem):
-        _dirs = stem_to_dirs.get(_stem, [])
-        _bundle = cmp_load_stem(None, _dirs, _feature_kind)
-        if _bundle is None:
-            return (
-                mo.md(f"⚠️ *No loadable folders for* `{_stem}`."),
-                {"checkpoint": _stem, "n_samples": 0,
-                 "feature_dim": 0, "deployed_auc": float("nan")},
-            )
-        _fig, _metrics = cmp_build_scatter(
-            _bundle, _stem, cmp_proj_picker.value, seed.value,
-            n_neighbors.value, min_dist.value, metric.value,
-        )
-        return _fig, _metrics
-
-    _fig_a, _met_a = _panel(cmp_a.value)
-    _fig_b, _met_b = _panel(cmp_b.value)
-
-    _table = _pd.DataFrame([_met_a, _met_b])
-
-    cmp_view = mo.vstack([
-        mo.hstack([_fig_a, _fig_b]),
-        mo.md("**Threshold-free comparison (deployed ROC-AUC):**"),
-        mo.ui.table(_table),
-    ])
-    cmp_view
-    return
-
 
 if __name__ == "__main__":
     app.run()
-
