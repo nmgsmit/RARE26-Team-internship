@@ -1,6 +1,10 @@
 # RARE26 Challenge — Team A
 
-Code for our submission to the RARE26 challenge (Recognition of Abnormalities in low-pREvalence cancer), developed as part of the AI&ES Master's Team Internship at TU Eindhoven. 
+Code for our submission to the RARE26 challenge (Recognition of Abnormalities in low-pREvalence cancer), developed as part of the AI&ES Master's Team Internship at TU Eindhoven.
+
+> **Branches**
+> - `main` — full research codebase with all ablation tooling, ROI helpers, and analysis scripts.
+> - `clean-baseline` — a minimal, self-contained branch that reproduces only the best-performing run. Intended as a clean starting point for future research: no ablation scaffolding, just the configuration that scored highest on the RARE26 challenge.
 
 ---
 
