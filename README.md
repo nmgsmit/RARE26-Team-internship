@@ -1,6 +1,6 @@
 # RARE26 Challenge — Team A
 
-Code for our submission to the RARE26 challenge (Recognition of Abnormalities in Real-world Endoscopy), developed as part of the AI&ES Master's Team Internship at TU Eindhoven. The full paper describing the methodology is available at https://github.com/nmgsmit/RARE26-Team-internship.
+Code for our submission to the RARE26 challenge (Recognition of Abnormalities in low-pREvalence cancer), developed as part of the AI&ES Master's Team Internship at TU Eindhoven. 
 
 ---
 
