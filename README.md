@@ -140,42 +140,49 @@ The ROI records are stored as JSON (default path: `./checkpoints/roi_records/`) 
 
 ## Elaborate example run (SLURM / HPC)
 
-The following reproduces the best single-model configuration from the paper: GastroNet-5M DINOv2 backbone, SupPro loss, 25% balanced sampler, ROI-guided crops at 0.95 scale, and a k-NN classification head, evaluated with a LOCO (leave-one-center-out) split.
+The following reproduces the best configuration from the paper: GastroNet-5M DINOv2 backbone, SupPro loss, ROI-guided crops, and a LOCO (leave-one-center-out) split to prevent patient-level data leakage.
 
-### Step 1 — Pretrain + finetune (one center held out at a time)
+### How LOCO works
 
-Submit two jobs, one per center, by changing `LOCO_CENTER`:
+LOCO is orchestrated entirely inside `train.py` when the `--loco` flag is set. A single job runs the full pipeline:
+
+1. **Pretrain loop** — one encoder is trained per held-out center (center 1 held out → encoder trained on center 2, and vice versa). Encoder checkpoints are saved under `<save-dir>/pretrain/fold{i}_val_{center}/`.
+2. **Finetune loop** — for each fold, the matching encoder is auto-loaded via the `--encoder-ckpt` template, and a classification head is trained on the remaining data.
+3. **Ensemble + submission artifact** — after all folds, `train.py` averages the fold predictions and writes a single merged `_submission.pt` file ready to be placed in the challenge container.
+
+No manual looping over centers is needed.
+
+### Step 1 — Submit the LOCO job
 
 ```bash
-for CENTER in 1 2; do
-  sbatch --export=ALL,\
-EXPERIMENT_ID=final_gastronet_suppro_loco_c${CENTER},\
-BACKBONES_CSV=gastronet,\
-TEMPERATURE=0.10,\
-PRETRAIN_BACKBONE_LR=1e-5,\
-PRETRAIN_PROJ_LR=3e-4,\
-FINETUNE_LR=2e-4,\
-BATCH_SIZE=32,\
-PRETRAIN_LOSS=suppro,\
-PRETRAIN_EPOCHS=30,\
-FINETUNE_EPOCHS=30,\
-AUGMENTATION_INTENSITY=3,\
-POSITIVE_SHARE=0.25,\
-ROI_FOCUS_PROB=1.0,\
-ROI_NEGATIVE_FOCUS_PROB=0.0,\
-ROI_WARMUP_EPOCHS=0,\
-ROI_MIN_CROP_SCALE=0.95,\
-ROI_MAX_CROP_SCALE=1.0,\
-HEAD_TYPE=knn,\
-LOCO_CENTER=${CENTER},\
-STAGES_CSV=pretrain,finetune,\
-WANDB_GROUP=final_loco,\
-EXPERIMENT_SAVE_SUBDIR=final_loco \
-  runscripts/jobscript_slurm_loco_final.sh
-done
+sbatch runscripts/jobscript_slurm_loco_final.sh
 ```
 
-This runs the full pretrain → finetune pipeline for each center split. Checkpoints are saved under `./checkpoints/final_loco/`.
+The script runs both stages in sequence in a single SLURM job (up to 24 h on a single A100). Progress is logged to `slurm_trainmodel/slurm_loco_final-<jobid>.out` and to Weights & Biases.
+
+Key hyperparameters used (set inside the script):
+
+| Parameter | Value |
+|---|---|
+| Backbone | GastroNet-5M DINOv2 (`gastronet`) |
+| Pretrain loss | `suppro`, τ = 0.10 |
+| Backbone LR | 1×10⁻⁵ |
+| Projection-head LR | 3×10⁻⁴ |
+| Finetune LR | 2×10⁻⁴ |
+| Batch size | 32 |
+| Epochs (pretrain / finetune) | 30 / 30 |
+| Augmentation intensity | 3 (default) |
+| ROI focus probability | 0.5 |
+| Crop scale range | [0.4, 1.0] |
+| Seed | 42 (deterministic) |
+
+When the job finishes, the submission artifact is at:
+
+```
+./checkpoints/<run_tag>/finetune/<run_tag>_finetune_submission.pt
+```
+
+with calibration metadata in the matching `_submission.json`.
 
 ### Step 2 — Extract embeddings for analysis (optional)
 
@@ -194,24 +201,30 @@ This saves pooled backbone features, projection-head features, and deployed logi
 ### Step 3 — Generate PCA projections (optional)
 
 ```bash
+cd Interactive_analysis
 python notebook_static.py \
   --features-dir features_out \
-  --experiment-id final_gastronet_suppro_loco_c1 \
+  --experiment-id <run_tag>_finetune \
   --output-dir pca_plots
 ```
 
-### Step 4 — Build the challenge submission
+### Step 4 — Challenge submission
+
+`Submission_files/predict.py` is designed to run inside the challenge Docker container. Paths are hardcoded to the container layout:
+
+| Path | Role |
+|---|---|
+| `/app/model.pt` | Model checkpoint to load |
+| `/data/test` | Directory of test images |
+| `/output/predictions.csv` | Output file written by the script |
+
+To use it, copy the `_submission.pt` artifact to `/app/model.pt` inside the container image and run:
 
 ```bash
-cd Submission_files
-python predict.py \
-  --checkpoint ../checkpoints/final_loco/final_gastronet_suppro_loco_c1/finetune_best.pt \
-  --checkpoint2 ../checkpoints/final_loco/final_gastronet_suppro_loco_c2/finetune_best.pt \
-  --images-dir /path/to/rare26/test_images \
-  --output predictions.csv
+python Submission_files/predict.py
 ```
 
-The two center checkpoints are averaged (LOCO ensembling) to produce the final submission. This is the exact strategy used for the RARE26 challenge submission.
+The script loads the single checkpoint (which already contains the LOCO-ensembled weights), runs inference over all test images, and writes `sample_id, prediction` rows to `/output/predictions.csv`.
 
 ---
 
