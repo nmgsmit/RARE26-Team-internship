@@ -1,12 +1,13 @@
 # SupCon-style feature evaluation
 
-This repo evaluates learned representations from SupPro/SupMin/Baseline
-checkpoints. The intended flow is:
+This folder evaluates learned representations from SupPro/SupMin/Baseline
+checkpoints. The current workflow is:
 
-1. Inspect the raw dataset with `notebook_data.py`.
-2. Use `runs.csv` plus the checkpoint folders to extract features.
-3. Share or download the resulting `features_out/` directory.
-4. Run the interactive and static notebooks for UMAP-style exploration.
+1. Use `runs.csv` plus the checkpoint folders to extract features.
+2. Share or download the resulting `features_out/` directory.
+3. Open `notebook.py` for interactive UMAP/PCA exploration.
+4. Use `figures_results.py` when you want publication-style comparison
+  figures.
 
 **Note: Python 3.10 or higher (e.g., Python 3.12) is required** to run the latest versions of the `marimo` notebook package.
 
@@ -20,22 +21,7 @@ pip install -r requirements.txt
 PyTorch on Apple Silicon will use MPS automatically when the scripts are run
 with `--device mps`. CPU is the default fallback.
 
-## 1. Explore the raw data first
-
-Before touching the model checkpoints, open the raw dataset notebook:
-
-```bash
-marimo run notebook_data.py
-```
-
-This notebook is meant to inspect the raw images and answer questions such as:
-
-- how many images are in each split and class
-- how the training centers are distributed
-- whether the image sizes, aspect ratios, or color statistics differ across centers
-- what the raw images look like before any model sees them
-
-## 2. Understand `runs.csv`
+## 1. Understand `runs.csv`
 
 `runs.csv` is the manifest that connects an experiment to the checkpoint file
 that should be evaluated. Each row is one run, and the important columns are:
@@ -50,7 +36,7 @@ When you add new checkpoints, update `runs.csv` so the extraction script knows
 what to load. The script uses `experiment_id` plus the dataset tag to name the
 output folder, for example `features_out/P0_Base_ResNet50_1e-3_t1__evc_test/`.
 
-## 3. Prepare the local folder layout
+## 2. Prepare the local folder layout
 
 If you are regenerating features instead of downloading the shared `features_out`, ensure your files are structured correctly. Since this analysis folder sits inside the repository, it expects the external data folders to be located two levels up (../../):
 
@@ -79,7 +65,7 @@ The current extraction script expects the checkpoint root to be `Checkpoints/`
 and the output root to be `features_out/`. If your folders live somewhere else,
 update the configuration block at the bottom of `extract_features.py`.
 
-## 4. Extract features
+## 3. Extract features
 
 You dont have to extract the features manually, this can also be done by downloading it from Onedrive in our shared Rare26 team intership folder. Saves a lot of time!
 
@@ -102,7 +88,7 @@ If you already received `features_out/` from OneDrive, you can skip this step
 and use the shared folder directly.
 
 
-## 5. Open the notebooks
+## 4. Open the analysis tools
 
 Interactive notebook:
 
@@ -110,21 +96,22 @@ Interactive notebook:
 marimo run notebook.py
 ```
 
-Static notebook:
+Paper figure generator:
 
 ```bash
-marimo run notebook_static.py
+python figures_results.py
 ```
 
-The interactive notebook is the one to use for day-to-day exploration. It lets
-you pick checkpoints and feature types, tune UMAP parameters, and click points
-to preview the source images. The static notebook is useful if you want a more
-shareable, less reactive version of the same analysis.
+`notebook.py` is the main analysis surface now. It lets you pick checkpoints
+and feature types, tune UMAP parameters, and click points to preview the source
+images. `figures_results.py` is the non-interactive path for generating the
+projection figures used in reports or papers.
+
+`notebook_data.py` and `notebook_static.py` are kept only as legacy references
+and are not part of the current workflow.
 
 ## Nice-to-know points
 
--- `notebook_data.py` is the best place to sanity-check the raw
-  dataset before model evaluation.
 - `extract_features.py` can process multiple checkpoints from `runs.csv` in one
   run.
 - The repo keeps both pooled and projection features, so you can compare the
@@ -133,14 +120,18 @@ shareable, less reactive version of the same analysis.
   expects a flat image directory with class labels encoded in the filenames.
 - If you change the checkpoint naming scheme, make sure `runs.csv` matches the
   new filenames exactly.
+- `figures_results.py` follows the same `features_out/` layout as the notebook,
+  so it can be run directly after feature extraction.
 
 ## File map
 
 ```text
-notebook_data.py  Raw dataset exploration
 extract_features.py          Feature extraction from checkpoints
 notebook.py                  Interactive UMAP notebook
-notebook_static.py           Static UMAP notebook
+figures_results.py           Publication-style comparison figures
+
+notebook_data.py             Legacy raw-dataset notebook
+notebook_static.py           Legacy static comparison notebook
 
 model.py                     Model definition and checkpoint loading
 data.py                      Dataset / dataloader helpers
