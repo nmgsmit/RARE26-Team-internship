@@ -17,6 +17,7 @@ from sklearn.metrics import (
     confusion_matrix,
     precision_recall_curve,
     roc_auc_score,
+    silhouette_score,
 )
 
 
@@ -139,6 +140,51 @@ def compute_group_eval_metrics(y_true, y_score, recall_target=0.90, threshold=No
     return metrics
 
 
+def compute_separation_metrics(features, labels, max_samples=2000, seed=0):
+    """How well the two classes separate in the pooled feature space the KNN/SVM
+    head classifies in. Raw (unnormalised) features with euclidean geometry, to
+    match the KNN's actual decision rule.
+
+    Returns (higher = better separated):
+      sep/silhouette       silhouette score (euclidean), in [-1, 1]
+      sep/fisher_ratio     between-class scatter / within-class scatter
+      sep/sep_ratio        inter-class / intra-class euclidean distance (~CAD/SAD)
+    """
+    X = np.asarray(features, dtype=float)
+    y = np.asarray(labels, dtype=int)
+    nan = float("nan")
+    out = OrderedDict([
+        ("sep/silhouette", nan),
+        ("sep/fisher_ratio", nan),
+        ("sep/sep_ratio", nan),
+    ])
+    if X.ndim != 2 or len(y) != len(X) or len(np.unique(y)) < 2:
+        return out
+    if min(np.bincount(y, minlength=2)[:2]) < 2:  # need >=2 per class
+        return out
+
+    # ponytail: silhouette is O(n^2); subsample above max_samples (stratified-ish).
+    if len(X) > max_samples:
+        rng = np.random.default_rng(seed)
+        idx = rng.choice(len(X), size=max_samples, replace=False)
+        X, y = X[idx], y[idx]
+
+    mu = {c: X[y == c].mean(axis=0) for c in (0, 1)}
+    # within-class scatter = mean squared euclidean distance to own centroid
+    within = {c: float(np.mean(np.sum((X[y == c] - mu[c]) ** 2, axis=1))) for c in (0, 1)}
+    between = float(np.sum((mu[0] - mu[1]) ** 2))
+    sw = within[0] + within[1]
+
+    intra = {c: float(np.mean(np.linalg.norm(X[y == c] - mu[c], axis=1))) for c in (0, 1)}
+    intra_eucl = 0.5 * (intra[0] + intra[1])
+    centroid_eucl = float(np.linalg.norm(mu[0] - mu[1]))
+
+    out["sep/silhouette"] = float(silhouette_score(X, y, metric="euclidean"))
+    out["sep/fisher_ratio"] = _safe_div(between, sw)
+    out["sep/sep_ratio"] = _safe_div(centroid_eucl, intra_eucl)
+    return out
+
+
 @torch.no_grad()
 def collect_scores(model, loader, device, tta=True):
     """(y_true, y_score) where y_score is the positive-class probability.
@@ -181,3 +227,24 @@ def log_val_metrics(epoch, optimizer, train_loss, valid_loss, valid_metrics, ext
     if extra:
         payload.update(extra)
     wandb.log(payload)
+
+
+def _demo():
+    """Separated classes must score better than overlapping ones."""
+    rng = np.random.default_rng(0)
+    y = np.array([0] * 100 + [1] * 100)
+    far = np.vstack([rng.normal(0, 0.1, (100, 8)) + 5, rng.normal(0, 0.1, (100, 8)) - 5])
+    near = rng.normal(0, 1.0, (200, 8))  # both classes drawn from the same blob
+    s_far = compute_separation_metrics(far, y)
+    s_near = compute_separation_metrics(near, y)
+    assert s_far["sep/silhouette"] > s_near["sep/silhouette"]
+    assert s_far["sep/fisher_ratio"] > s_near["sep/fisher_ratio"]
+    assert s_far["sep/sep_ratio"] > s_near["sep/sep_ratio"]
+    # degenerate inputs return NaNs, not crashes
+    bad = compute_separation_metrics(np.zeros((3, 4)), np.array([0, 0, 0]))
+    assert all(np.isnan(v) for v in bad.values())
+    print("ok:", {k: round(v, 3) for k, v in s_far.items()})
+
+
+if __name__ == "__main__":
+    _demo()

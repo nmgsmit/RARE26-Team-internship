@@ -46,6 +46,7 @@ from data import (
 from metrics import (
     collect_scores,
     compute_group_eval_metrics,
+    compute_separation_metrics,
     log_val_metrics,
 )
 from model import (
@@ -292,6 +293,7 @@ def _pretrain_one_fold(args, fold_index, device) -> str:
         # finetune fit, so we don't run them here.
         model.eval()
         val_loss = 0.0
+        val_feat, val_labels = [], []
         with torch.no_grad():
             # Two views on val too. SimpleDataset returns (image, label); we
             # duplicate the same view since augmentation is off at eval.
@@ -306,13 +308,22 @@ def _pretrain_one_fold(args, fold_index, device) -> str:
                     temperature=fold_args.temperature,
                     base_temperature=fold_args.base_temperature,
                 ).item()
+                val_feat.append(feat.cpu())
+                val_labels.append(labels.cpu())
         val_loss /= max(1, len(valid_loader))
+
+        # Class separation in the pooled feature space the KNN/SVM head uses
+        # (the inference-time representation; the proj head is discarded).
+        sep = compute_separation_metrics(
+            torch.cat(val_feat).numpy(), torch.cat(val_labels).numpy()
+        )
 
         wandb.log({
             "epoch": epoch + 1,
             "learning_rate": optimizer.param_groups[0]["lr"],
             "train_loss": train_loss,
             "valid_loss": val_loss,
+            **sep,
         })
         print(f"  epoch {epoch + 1}/{fold_args.epochs} | train {train_loss:.4f} | val {val_loss:.4f}")
 
@@ -571,6 +582,29 @@ def _save_ensemble_bundles(per_fold_results: list[dict], args):
         out_path = out_dir / f"ensemble_{head_tag}.pt"
         torch.save(bundle, out_path)
         print(f"  Saved ensemble bundle -> {out_path}")
+
+        # One comparable W&B row per ablation: the pooled cross-center (LOCO)
+        # metrics. Logged into wandb.summary so each ensemble is a single sortable
+        # row, distinct from the per-fold finetune runs (filter run_type=ensemble).
+        run = wandb.init(
+            project=args.wandb_project,
+            group=args.wandb_group,
+            name=f"{args.experiment_id}_ensemble_{head_tag}",
+            job_type="ensemble",
+            config={
+                "run_type": "ensemble",
+                "head_type": head_type,
+                "head_hp": hp_value,
+                "ensemble_n_folds": len(payloads),
+                "fold_indices": [fp["fold_index"] for fp in payloads],
+            },
+            mode=args.wandb_mode,
+            reinit=True,
+        )
+        wandb.log({f"pooled/{k}": v for k, v in pooled_metrics.items()})
+        for key, value in pooled_metrics.items():
+            wandb.summary[f"pooled/{key}"] = value
+        run.finish()
 
 
 # ---------------------------------------------------------------------------
