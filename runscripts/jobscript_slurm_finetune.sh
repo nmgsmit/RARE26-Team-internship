@@ -24,6 +24,11 @@ mkdir -p slurm_logs
 if [ -f ".env" ]; then
     WANDB_API_KEY=$(grep '^WANDB_API_KEY=' .env | head -n 1 | cut -d= -f2- | tr -d '\r' | xargs)
     if [ -n "${WANDB_API_KEY}" ]; then export WANDB_API_KEY; fi
+    # W&B routing defaults from .env (ngmtue/rare26). A value passed on the
+    # sbatch line (--export) still wins via :=.
+    : "${WANDB_ENTITY:=$(grep '^WANDB_ENTITY=' .env | head -n 1 | cut -d= -f2- | tr -d '\r' | xargs)}"
+    : "${WANDB_PROJECT:=$(grep '^WANDB_PROJECT=' .env | head -n 1 | cut -d= -f2- | tr -d '\r' | xargs)}"
+    export WANDB_ENTITY WANDB_PROJECT
 fi
 
 module load 2023
@@ -44,7 +49,7 @@ export CUBLAS_WORKSPACE_CONFIG=":4096:8"
 
 EXPERIMENT_ID="${EXPERIMENT_ID:-clean_baseline}"
 WANDB_GROUP="${WANDB_GROUP:-clean-baseline}"
-WANDB_PROJECT="${WANDB_PROJECT:-RARE25-Project}"
+WANDB_PROJECT="${WANDB_PROJECT:-rare26}"
 BACKBONE_PRESET="${BACKBONE_PRESET:-gastronet}"
 INPUT_SIZE="${INPUT_SIZE:-336}"
 BATCH_SIZE="${BATCH_SIZE:-32}"

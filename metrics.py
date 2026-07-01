@@ -110,13 +110,32 @@ def compute_operating_metrics(y_true, y_score, threshold):
     return metrics
 
 
-def compute_group_eval_metrics(y_true, y_score, recall_target=0.90, threshold=None):
-    """Returns AUROC/AUPRC/PPV@90R + the operating-point metrics at the chosen threshold."""
+def ppv_at_prevalence(tpr, fpr, prevalence):
+    """Rescale a fixed (TPR, FPR) operating point to a different positive
+    prevalence: PPV(pi) = TPR*pi / (TPR*pi + FPR*(1-pi)). Lets us read PPV at
+    the ~1% deployment prevalence from the dataset's natural (much higher) one,
+    with no retraining -- see prevalence_analysis.py for the sweep this mirrors.
+    """
+    if not (np.isfinite(tpr) and np.isfinite(fpr)):
+        return float("nan")
+    denom = tpr * prevalence + fpr * (1 - prevalence)
+    return float(tpr * prevalence / denom) if denom > 0 else float("nan")
+
+
+def compute_group_eval_metrics(y_true, y_score, recall_target=0.90, threshold=None, target_prevalence=0.01):
+    """Returns AUROC/AUPRC/PPV@90R + the operating-point metrics at the chosen threshold.
+
+    Also reports PPV@90RECALL@<target_prevalence>PREV: the PPV@90R operating
+    point (TPR/FPR) rescaled to target_prevalence, since raw PPV@90RECALL is
+    computed at this dataset's (much higher) natural prevalence and is not
+    representative of the ~1% deployment target.
+    """
     y_true, y_score = _to_numpy(y_true, y_score)
     nan = float("nan")
 
     metrics = OrderedDict([
         ("PPV@90RECALL", nan),
+        (f"PPV@90RECALL@{target_prevalence:g}PREV", nan),
         ("AUROC", nan),
         ("AUPRC", nan),
         ("Total Samples", int(len(y_true))),
@@ -137,6 +156,9 @@ def compute_group_eval_metrics(y_true, y_score, recall_target=0.90, threshold=No
     op = compute_operating_metrics(y_true, y_score, threshold)
     for key, value in op.items():
         metrics[key] = value
+
+    metrics[f"PPV@90RECALL@{target_prevalence:g}PREV"] = ppv_at_prevalence(
+        metrics["TPR"], metrics["FPR"], target_prevalence)
     return metrics
 
 
@@ -240,6 +262,11 @@ def _demo():
     assert s_far["sep/silhouette"] > s_near["sep/silhouette"]
     assert s_far["sep/fisher_ratio"] > s_near["sep/fisher_ratio"]
     assert s_far["sep/sep_ratio"] > s_near["sep/sep_ratio"]
+
+    # PPV should shrink as prevalence drops, and match the natural-prevalence PPV at pi=P/(P+N).
+    assert ppv_at_prevalence(0.9, 0.05, 0.5) > ppv_at_prevalence(0.9, 0.05, 0.01)
+    natural = ppv_at_prevalence(0.9, 0.05, 100 / (100 + 100))
+    assert abs(natural - (0.9 * 100) / (0.9 * 100 + 0.05 * 100)) < 1e-9
     # degenerate inputs return NaNs, not crashes
     bad = compute_separation_metrics(np.zeros((3, 4)), np.array([0, 0, 0]))
     assert all(np.isnan(v) for v in bad.values())

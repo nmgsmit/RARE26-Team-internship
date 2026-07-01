@@ -31,6 +31,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import wandb
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, SequentialLR
 from torch.utils.data import DataLoader
@@ -169,6 +171,14 @@ def get_args_parser():
                    help="Positive fraction per batch when --balanced-sampler is set.")
     p.add_argument("--augmentation-intensity", type=int, default=3, choices=[1, 2, 3, 4],
                    help="Augmentation preset: 1=low, 2=medium, 3=strong, 4=extreme.")
+    p.add_argument("--crop-min-scale", type=float, default=0.95,
+                   help="Lower bound of the random-crop scale range [min, 1.0] used to build the "
+                        "two SupPro views. 0.95 reproduces the best run; 1.0 disables cropping.")
+    p.add_argument("--inner-val-frac", type=float, default=0.0,
+                   help="DEPRECATED / DO NOT USE (>0): a random within-center inner-val split LEAKS at "
+                        "the patient level (multiple frames per patient land in both splits), so isel "
+                        "measures memorisation. Keep 0. 0 = select best epoch on the cross-center probe "
+                        "(optimistic; only valid as a monitoring signal).")
 
     # Finetune (sklearn-head) hyperparameter sweeps
     p.add_argument("--head-types", default="knn",
@@ -223,9 +233,13 @@ def _pretrain_one_fold(args, fold_index, device) -> str:
     fold_args.fold_index = fold_index
     fold_args.balanced_sampler = True  # SupPro pretrain always wants balanced batches
 
-    train_loader, valid_loader, train_ds, _val_ds, class_names, train_df, val_df = (
-        prepare_datasets(fold_args, device)
-    )
+    # Reproducibility: re-seed per fold so a fold is identical whether run alone
+    # (--fold-index i) or as part of a --loco sweep. Without this, fold i inherits
+    # whatever RNG state the previous folds left behind -> different init/data order.
+    seed_everything(int(args.seed) + fold_index)
+
+    (train_loader, valid_loader, train_ds, _val_ds, class_names, train_df, val_df,
+     inner_train_loader, inner_val_loader) = prepare_datasets(fold_args, device)
 
     model = _build_model_for_pretrain(fold_args, len(class_names), device)
     optimizer = AdamW([
@@ -256,7 +270,18 @@ def _pretrain_one_fold(args, fold_index, device) -> str:
     print(f"Save dir: {save_dir}")
 
     best_val_loss = float("inf")
+    best_probe_score = float("-inf")   # encoder selected by PPV@90R@1%prev (isel, or probe if no inner split)
+    best_probe_epoch = 0
+    best_state = None
     encoder_path = save_dir / f"{experiment_id}_encoder.pt"
+
+    # Deterministic (eval-transform) loader over the TRAIN center, for the
+    # per-epoch cross-center kNN probe below.
+    train_eval_loader = DataLoader(
+        SimpleDataset(train_df, build_eval_transform(fold_args.input_size)),
+        batch_size=fold_args.batch_size, shuffle=False,
+        num_workers=fold_args.num_workers, pin_memory=True, worker_init_fn=seed_worker,
+    )
 
     for epoch in range(fold_args.epochs):
         model.train()
@@ -293,7 +318,7 @@ def _pretrain_one_fold(args, fold_index, device) -> str:
         # finetune fit, so we don't run them here.
         model.eval()
         val_loss = 0.0
-        val_feat, val_labels = [], []
+        val_feat, val_proj, val_labels = [], [], []
         with torch.no_grad():
             # Two views on val too. SimpleDataset returns (image, label); we
             # duplicate the same view since augmentation is off at eval.
@@ -309,14 +334,56 @@ def _pretrain_one_fold(args, fold_index, device) -> str:
                     base_temperature=fold_args.base_temperature,
                 ).item()
                 val_feat.append(feat.cpu())
+                val_proj.append(proj.cpu())
                 val_labels.append(labels.cpu())
         val_loss /= max(1, len(valid_loader))
 
-        # Class separation in the pooled feature space the KNN/SVM head uses
-        # (the inference-time representation; the proj head is discarded).
-        sep = compute_separation_metrics(
-            torch.cat(val_feat).numpy(), torch.cat(val_labels).numpy()
-        )
+        y = torch.cat(val_labels).numpy()
+        X_val = torch.cat(val_feat).numpy()
+        # sep/* : pooled feature space the KNN/SVM head actually uses (the
+        #   inference-time representation; this is what should track downstream).
+        # sep_proj/* : projection space the SupPro loss directly optimises. It
+        #   rises ~tautologically; the gap to sep/* shows how much "separation"
+        #   is just the discarded projection head, not transferable features.
+        sep = compute_separation_metrics(X_val, y)
+        sep_proj = {k.replace("sep/", "sep_proj/"): v
+                    for k, v in compute_separation_metrics(torch.cat(val_proj).numpy(), y).items()}
+
+        # probe/* : cross-center LOGISTIC probe (continuous scores). Fit on the
+        # TRAIN center's StandardScaler'd pooled features, score the held-out
+        # center -> an honest per-epoch preview of the LOCO downstream metric.
+        # A kNN probe is useless here: its score-0 ties pin PPV@90R at the
+        # prevalence floor and hide the encoder actually improving.
+        probe = {}
+        X_tr, y_tr = _extract_features(model, train_eval_loader, device)
+        if len(np.unique(y_tr)) >= 2:
+            scaler = StandardScaler().fit(X_tr)
+            clf = LogisticRegression(max_iter=2000, class_weight="balanced")
+            clf.fit(scaler.transform(X_tr), y_tr)
+            pos_col = list(clf.classes_).index(1)
+            val_scores = clf.predict_proba(scaler.transform(X_val))[:, pos_col]
+            pm = compute_group_eval_metrics(y, val_scores)
+            # FPR/TPR are at the 90%-recall threshold -> FPR@90recall is the
+            # deployment-bottleneck number (PPV at low prevalence is FPR-limited).
+            probe = {f"probe/{k}": pm[k] for k in
+                     ("PPV@90RECALL", "PPV@90RECALL@0.01PREV", "AUROC", "AUPRC", "FPR", "TPR")}
+
+        # isel/* : HONEST epoch-selection signal. Logistic fit on inner-train,
+        # scored on inner-val (both from the TRAIN center) -> never touches the
+        # eval center, so the held-out-center report stays unbiased. probe/* (on
+        # the eval center) is logged for monitoring only, NOT for selection.
+        isel = {}
+        if inner_val_loader is not None:
+            Xi_tr, yi_tr = _extract_features(model, inner_train_loader, device)
+            Xi_va, yi_va = _extract_features(model, inner_val_loader, device)
+            if len(np.unique(yi_tr)) >= 2 and len(np.unique(yi_va)) >= 2:
+                isc = StandardScaler().fit(Xi_tr)
+                iclf = LogisticRegression(max_iter=2000, class_weight="balanced").fit(isc.transform(Xi_tr), yi_tr)
+                ipc = list(iclf.classes_).index(1)
+                isv = iclf.predict_proba(isc.transform(Xi_va))[:, ipc]
+                im = compute_group_eval_metrics(yi_va, isv)
+                isel = {f"isel/{k}": im[k] for k in
+                        ("PPV@90RECALL", "PPV@90RECALL@0.01PREV", "AUROC", "AUPRC", "FPR")}
 
         wandb.log({
             "epoch": epoch + 1,
@@ -324,23 +391,50 @@ def _pretrain_one_fold(args, fold_index, device) -> str:
             "train_loss": train_loss,
             "valid_loss": val_loss,
             **sep,
+            **sep_proj,
+            **probe,
+            **isel,
         })
-        print(f"  epoch {epoch + 1}/{fold_args.epochs} | train {train_loss:.4f} | val {val_loss:.4f}")
+        print(
+            f"  epoch {epoch + 1}/{fold_args.epochs} | train {train_loss:.4f} | "
+            f"val {val_loss:.4f} | probe PPV@90R={probe.get('probe/PPV@90RECALL', float('nan')):.4f} "
+            f"AUROC={probe.get('probe/AUROC', float('nan')):.4f}"
+        )
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
 
-    # Save the final encoder. We don't bother with best-checkpoint selection
-    # for pretrain — downstream finetune can be re-run cheaply on whichever
-    # encoder you want.
+        # Select the encoder by PPV@90RECALL rescaled to the ~1% deployment
+        # prevalence (the challenge operating point), using the HONEST inner-val
+        # split (isel) when available; fall back to the cross-center probe (on
+        # the held-out center) otherwise -- that's the default (inner_val_frac=0),
+        # so by default selection happens on the held-out center.
+        sel_score = isel.get("isel/PPV@90RECALL@0.01PREV",
+                              probe.get("probe/PPV@90RECALL@0.01PREV", float("-inf")))
+        if np.isnan(sel_score):
+            sel_score = float("-inf")
+        if best_state is None or sel_score > best_probe_score:
+            best_probe_score = sel_score
+            best_probe_epoch = epoch + 1
+            best_state = {
+                "backbone": copy.deepcopy(model.backbone.state_dict()),
+                "proj_head": copy.deepcopy(model.proj_head.state_dict()),
+            }
+
+    # Save the BEST-probe encoder (highest cross-center logistic-probe AUPRC),
+    # falling back to the final weights when no probe ran (e.g. epochs=0).
+    wandb.summary["best_probe_epoch"] = best_probe_epoch
+    wandb.summary["best_probe_ppv90r_1pct"] = best_probe_score if best_state else None
+    print(f"Best-probe epoch: {best_probe_epoch} (PPV@90R@1%prev={best_probe_score:.4f})")
     torch.save({
-        "backbone": model.backbone.state_dict(),
-        "proj_head": model.proj_head.state_dict(),
+        "backbone": best_state["backbone"] if best_state else model.backbone.state_dict(),
+        "proj_head": best_state["proj_head"] if best_state else model.proj_head.state_dict(),
         "backbone_name": BACKBONE_PRESETS[fold_args.backbone_preset],
         "backbone_preset": fold_args.backbone_preset,
         "input_size": fold_args.input_size,
         "num_folds": fold_args.num_folds,
         "fold_index": fold_index,
+        "best_probe_epoch": best_probe_epoch,
         "model_config": {
             "in_channels": 3,
             "n_classes": len(class_names),

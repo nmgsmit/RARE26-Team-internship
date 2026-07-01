@@ -18,6 +18,11 @@ mkdir -p slurm_logs
 if [ -f ".env" ]; then
     WANDB_API_KEY=$(grep '^WANDB_API_KEY=' .env | head -n 1 | cut -d= -f2- | tr -d '\r' | xargs)
     if [ -n "${WANDB_API_KEY}" ]; then export WANDB_API_KEY; fi
+    # W&B routing defaults from .env (ngmtue/rare26). A value passed on the
+    # sbatch line (--export) still wins via :=.
+    : "${WANDB_ENTITY:=$(grep '^WANDB_ENTITY=' .env | head -n 1 | cut -d= -f2- | tr -d '\r' | xargs)}"
+    : "${WANDB_PROJECT:=$(grep '^WANDB_PROJECT=' .env | head -n 1 | cut -d= -f2- | tr -d '\r' | xargs)}"
+    export WANDB_ENTITY WANDB_PROJECT
 fi
 
 # ── Environment ──────────────────────────────────────────────────────────────
@@ -40,7 +45,7 @@ export CUBLAS_WORKSPACE_CONFIG=":4096:8"
 # ── Run configuration ────────────────────────────────────────────────────────
 EXPERIMENT_ID="${EXPERIMENT_ID:-clean_baseline}"
 WANDB_GROUP="${WANDB_GROUP:-clean-baseline}"
-WANDB_PROJECT="${WANDB_PROJECT:-RARE25-Project}"
+WANDB_PROJECT="${WANDB_PROJECT:-rare26}"
 BACKBONE_PRESET="${BACKBONE_PRESET:-gastronet}"
 BACKBONE_WEIGHTS="${BACKBONE_WEIGHTS:-../Gastronet/dinov2.pth}"
 INPUT_SIZE="${INPUT_SIZE:-336}"
@@ -53,6 +58,8 @@ TEMPERATURE="${TEMPERATURE:-0.1}"
 BASE_TEMPERATURE="${BASE_TEMPERATURE:-0.07}"
 POS_RATIO="${POS_RATIO:-0.2}"
 AUGMENTATION_INTENSITY="${AUGMENTATION_INTENSITY:-3}"
+CROP_MIN_SCALE="${CROP_MIN_SCALE:-0.95}"
+INNER_VAL_FRAC="${INNER_VAL_FRAC:-0.0}"
 DATA_DIR="${DATA_DIR:-../data/Challenge_train_data}"
 NUM_FOLDS="${NUM_FOLDS:-2}"
 NUM_WORKERS="${NUM_WORKERS:-10}"
@@ -72,7 +79,7 @@ python train.py \
     --stage pretrain \
     --loco \
     --num-folds "${NUM_FOLDS}" \
-    --fold-index 0 \
+    --fold-index "${FOLD_INDEX:-0}" \
     --backbone-preset "${BACKBONE_PRESET}" \
     --backbone-weights-path "${BACKBONE_WEIGHTS}" \
     --input-size "${INPUT_SIZE}" \
@@ -86,6 +93,8 @@ python train.py \
     --balanced-sampler \
     --pos-ratio "${POS_RATIO}" \
     --augmentation-intensity "${AUGMENTATION_INTENSITY}" \
+    --crop-min-scale "${CROP_MIN_SCALE}" \
+    --inner-val-frac "${INNER_VAL_FRAC}" \
     --data-dir "${DATA_DIR}" \
     --num-workers "${NUM_WORKERS}" \
     --seed "${SEED}" \

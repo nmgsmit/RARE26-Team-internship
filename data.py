@@ -59,14 +59,40 @@ def build_eval_transform(input_size: int):
     ])
 
 
-def build_train_transform(input_size: int, augmentation_intensity: int):
+class RandomFixedScaleCrop:
+    """Random crop covering a uniform linear fraction [min_scale, max_scale] of
+    the image at a random position (aspect ratio preserved). This is the
+    augmentation that generated the two SupPro views in the best run; without it
+    the two views differ only by flip/colour and the contrastive task collapses.
+
+    Port of main's data.py:_random_full_image_crop_fixed_scale (no ROI).
+    """
+
+    def __init__(self, min_scale: float, max_scale: float = 1.0):
+        self.min_scale = float(min_scale)
+        self.max_scale = float(max_scale)
+
+    def __call__(self, image):
+        s = float(torch.empty(1).uniform_(self.min_scale, self.max_scale).item())
+        w, h = image.size
+        cw, ch = max(1, int(s * w)), max(1, int(s * h))
+        left = int(torch.randint(0, max(1, w - cw + 1), (1,)).item())
+        top = int(torch.randint(0, max(1, h - ch + 1), (1,)).item())
+        return image.crop((left, top, left + cw, top + ch))
+
+
+def build_train_transform(input_size: int, augmentation_intensity: int,
+                          crop_min_scale: float = 0.95):
     if augmentation_intensity not in AUGMENTATION_PRESETS:
         raise ValueError(
             f"augmentation_intensity must be one of {sorted(AUGMENTATION_PRESETS)}, "
             f"got {augmentation_intensity}"
         )
     p = AUGMENTATION_PRESETS[augmentation_intensity]
-    return Compose([
+    steps = []
+    if crop_min_scale < 1.0:  # crop_min_scale=1.0 disables cropping
+        steps.append(RandomFixedScaleCrop(crop_min_scale, 1.0))
+    steps += [
         ToImage(),
         Resize((input_size, input_size)),
         RandomHorizontalFlip(p=p["h_flip_p"]),
@@ -76,7 +102,8 @@ def build_train_transform(input_size: int, augmentation_intensity: int):
                      saturation=p["cs"], hue=p["ch"]),
         ToDtype(torch.float32, scale=True),
         Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
+    ]
+    return Compose(steps)
 
 
 # ---------------------------------------------------------------------------
@@ -282,25 +309,47 @@ def prepare_datasets(args, device):
     input_size = int(getattr(args, "input_size", 336))
     data_dir = getattr(args, "data_dir", DEFAULT_DATA_DIR)
     aug_intensity = int(getattr(args, "augmentation_intensity", 3))
+    crop_min_scale = float(getattr(args, "crop_min_scale", 0.95))
     seed = int(getattr(args, "seed", 42))
 
     print(f"Input size: {input_size}x{input_size}")
     print(f"Augmentation intensity: {aug_intensity} "
           f"({AUGMENTATION_PRESETS[aug_intensity]['name']})")
+    print(f"Crop scale: [{crop_min_scale}, 1.0]"
+          + (" (cropping disabled)" if crop_min_scale >= 1.0 else ""))
 
-    train_transform = build_train_transform(input_size, aug_intensity)
+    train_transform = build_train_transform(input_size, aug_intensity, crop_min_scale)
     eval_transform = build_eval_transform(input_size)
 
     df, class_names = build_dataset_dataframe(data_dir)
     train_df, val_df, _holdout = split_dataframe(df, args)
 
-    train_ds = TwoViewDataset(train_df, train_transform)
+    # Rigorous epoch selection: optionally hold out an inner-validation split from
+    # the TRAIN center. The encoder trains on inner-train ONLY; the held-out CENTER
+    # (val_df) is never used for selection -> honest cross-center eval.
+    inner_val_frac = float(getattr(args, "inner_val_frac", 0.0))
+    inner_train_loader = inner_val_loader = None
+    fit_df = train_df
+    if inner_val_frac > 0.0:
+        fit_df, inner_val_df = train_test_split(
+            train_df, test_size=inner_val_frac, stratify=train_df["label"], random_state=seed,
+        )
+        fit_df = fit_df.reset_index(drop=True)
+        inner_val_df = inner_val_df.reset_index(drop=True)
+        mk_eval = lambda d: DataLoader(
+            SimpleDataset(d, eval_transform), batch_size=int(args.batch_size), shuffle=False,
+            num_workers=int(args.num_workers), pin_memory=True, worker_init_fn=seed_worker)
+        inner_train_loader, inner_val_loader = mk_eval(fit_df), mk_eval(inner_val_df)
+        print(f"Inner-val split: inner-train n={len(fit_df)} (pos={int((fit_df['label']==1).sum())}) "
+              f"| inner-val n={len(inner_val_df)} (pos={int((inner_val_df['label']==1).sum())})")
+
+    train_ds = TwoViewDataset(fit_df, train_transform)
     valid_ds = SimpleDataset(val_df, eval_transform)
     train_generator = build_seeded_generator(seed)
 
     if getattr(args, "balanced_sampler", False):
         sampler = BalancedBatchSampler(
-            labels=train_df["label"].tolist(),
+            labels=fit_df["label"].tolist(),
             batch_size=int(args.batch_size),
             pos_ratio=float(getattr(args, "pos_ratio", 0.2)),
             drop_last=False,
@@ -328,4 +377,26 @@ def prepare_datasets(args, device):
         num_workers=int(args.num_workers), pin_memory=True,
         worker_init_fn=seed_worker,
     )
-    return train_loader, valid_loader, train_ds, valid_ds, class_names, train_df, val_df
+    return (train_loader, valid_loader, train_ds, valid_ds, class_names, train_df, val_df,
+            inner_train_loader, inner_val_loader)
+
+
+def _demo():
+    """RandomFixedScaleCrop must stay within [min_scale, 1.0] of each side, and
+    two draws on the same image must differ (otherwise the SupPro views collapse)."""
+    img = Image.new("RGB", (200, 100))
+    crop = RandomFixedScaleCrop(0.95, 1.0)
+    for _ in range(50):
+        out = crop(img)
+        assert 0.95 * 200 - 1 <= out.size[0] <= 200, out.size
+        assert 0.95 * 100 - 1 <= out.size[1] <= 100, out.size
+    # crop_min_scale=1.0 -> no crop step in the pipeline
+    assert any(isinstance(t, RandomFixedScaleCrop)
+               for t in build_train_transform(336, 3, 0.95).transforms)
+    assert not any(isinstance(t, RandomFixedScaleCrop)
+                   for t in build_train_transform(336, 3, 1.0).transforms)
+    print("ok: RandomFixedScaleCrop within bounds; scale=1.0 disables cropping")
+
+
+if __name__ == "__main__":
+    _demo()
